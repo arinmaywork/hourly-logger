@@ -114,7 +114,6 @@ def queue_mark_skipped(row_id: int):
 
 
 def backfill_missed_prompts():
-    """Queue any hours missed while the bot was offline."""
     with db_connect() as conn:
         last = conn.execute(
             "SELECT MAX(scheduled_ts) FROM queue"
@@ -149,26 +148,31 @@ def get_sheet():
     try:
         return spreadsheet.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=SHEET_NAME, rows=5000, cols=4)
+        ws = spreadsheet.add_worksheet(title=SHEET_NAME, rows=5000, cols=5)
         ws.append_row(
-            ["Scheduled Time", "Submitted Time", "Entry", "Lag (minutes)"],
+            ["Scheduled Time", "Submitted Time", "Tag", "Note", "Lag (minutes)"],
             value_input_option="USER_ENTERED",
         )
         return ws
 
 
-def sheets_append_row(scheduled_ts: datetime, submitted_ts: datetime, text: str):
+def sheets_append_row(scheduled_ts: datetime, submitted_ts: datetime, tag: str, note: str = ""):
     import time
     lag = round((submitted_ts - scheduled_ts).total_seconds() / 60, 1)
     row = [
         scheduled_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M"),
         submitted_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M"),
-        text,
+        tag,
+        note,
         lag,
     ]
     for attempt in range(5):
         try:
-            get_sheet().append_row(row, value_input_option="USER_ENTERED")
+            sheet = get_sheet()
+            headers = sheet.row_values(1)
+            if "Note" not in headers:
+                sheet.update("A1:E1", [["Scheduled Time", "Submitted Time", "Tag", "Note", "Lag (minutes)"]])
+            sheet.append_row(row, value_input_option="USER_ENTERED")
             log.info("Row appended: %s", row)
             return
         except gspread.exceptions.APIError as e:
@@ -186,6 +190,7 @@ def sheets_append_row(scheduled_ts: datetime, submitted_ts: datetime, text: str)
 
 # ─── Bot State ────────────────────────────────────────────────────────────────
 
+# stages: "tag" → waiting for short tag, "note" → waiting for note
 current_prompt: dict = {}
 
 
@@ -200,14 +205,16 @@ async def send_prompt(bot, queue_row):
     msg = (
         f"{header}"
         f"📝 *Hourly Log* — `{scheduled.strftime('%a %b %d, %H:%M')}`\n\n"
-        f"What's on your mind? Type your entry below.\n"
-        f"_(Reply /skip to skip this slot)_"
+        f"*Step 1/2:* What's your activity tag?\n"
+        f"_(e.g. Tasks, AI Tool, Sleep, Exercise)_"
     )
     try:
         await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
         current_prompt = {
             "queue_id":     queue_row["id"],
             "scheduled_ts": queue_row["scheduled_ts"],
+            "stage":        "tag",
+            "tag":          None,
         }
     except (NetworkError, TelegramError) as e:
         log.error("Failed to send prompt: %s", e)
@@ -233,31 +240,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    now      = datetime.now(timezone.utc)
-    queue_id = current_prompt["queue_id"]
-    sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"])
-    queue_mark_done(queue_id, text, now)
-
-    try:
-        sheets_append_row(sched_ts, now, text)
-        await update.message.reply_text("✅ Logged to Google Sheets!")
-    except Exception as e:
-        log.error("Sheets write failed: %s", e)
+    # ── Stage 1: Waiting for tag ───────────────────────────────────────────
+    if current_prompt.get("stage") == "tag":
+        current_prompt["tag"]   = text
+        current_prompt["stage"] = "note"
         await update.message.reply_text(
-            "⚠️ Saved locally but Google Sheets write failed. Use /sync to retry."
+            f"✏️ Tag: *{text}*\n\n"
+            f"*Step 2/2:* Add a note for this hour?\n"
+            f"_(Type anything or /skip to leave blank)_",
+            parse_mode="Markdown",
         )
+        return
 
-    current_prompt = {}
-    await asyncio.sleep(0.5)
+    # ── Stage 2: Waiting for note ──────────────────────────────────────────
+    if current_prompt.get("stage") == "note":
+        tag      = current_prompt["tag"]
+        note     = text
+        now      = datetime.now(timezone.utc)
+        queue_id = current_prompt["queue_id"]
+        sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"])
 
-    next_pending = queue_get_oldest_pending()
-    if next_pending:
-        await update.message.reply_text(
-            f"➡️ {queue_count_pending()} more to go — here's the next one:"
-        )
-        await send_prompt(context.bot, next_pending)
-    else:
-        await update.message.reply_text("🎉 All caught up! I'll ping you again next hour.")
+        combined = f"{tag} | {note}"
+        queue_mark_done(queue_id, combined, now)
+
+        try:
+            sheets_append_row(sched_ts, now, tag, note)
+            await update.message.reply_text(
+                f"✅ *Logged!*\n• Tag: {tag}\n• Note: {note}",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            log.error("Sheets write failed: %s", e)
+            await update.message.reply_text(
+                "⚠️ Saved locally but Google Sheets write failed. Use /sync to retry."
+            )
+
+        current_prompt = {}
+        await asyncio.sleep(0.5)
+
+        next_pending = queue_get_oldest_pending()
+        if next_pending:
+            await update.message.reply_text(
+                f"➡️ {queue_count_pending()} more to go — here's the next one:"
+            )
+            await send_prompt(context.bot, next_pending)
+        else:
+            await update.message.reply_text(
+                "🎉 All caught up! I'll ping you again next hour."
+            )
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,12 +308,33 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_prompt
     if update.effective_chat.id != CHAT_ID:
         return
+
     if not current_prompt:
         await update.message.reply_text("Nothing to skip right now.")
         return
-    queue_mark_skipped(current_prompt["queue_id"])
+
+    # On note stage — save tag only, skip note
+    if current_prompt.get("stage") == "note":
+        tag      = current_prompt["tag"]
+        now      = datetime.now(timezone.utc)
+        queue_id = current_prompt["queue_id"]
+        sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"])
+        queue_mark_done(queue_id, tag, now)
+        try:
+            sheets_append_row(sched_ts, now, tag, note="")
+            await update.message.reply_text(
+                f"✅ *Logged without note!*\n• Tag: {tag}",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            log.error("Sheets write failed: %s", e)
+            await update.message.reply_text("⚠️ Saved locally, Sheets write failed.")
+    else:
+        # Skip entire prompt
+        queue_mark_skipped(current_prompt["queue_id"])
+        await update.message.reply_text("⏭ Skipped.")
+
     current_prompt = {}
-    await update.message.reply_text("⏭ Skipped.")
     next_pending = queue_get_oldest_pending()
     if next_pending:
         await send_prompt(context.bot, next_pending)
@@ -339,7 +390,6 @@ def main():
     app.add_handler(CommandHandler("sync",   cmd_sync))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # APScheduler wired into the app's event loop
     async def on_startup(application: Application):
         scheduler = AsyncIOScheduler(timezone="UTC")
         scheduler.add_job(
