@@ -212,8 +212,15 @@ def sheets_append_row(scheduled_ts: datetime, submitted_ts: datetime, category: 
 def sheets_update_grid(scheduled_ts: datetime, category: str, tag: str):
     """Updates the visual grid sheet based on date and hour."""
     local_dt = scheduled_ts.astimezone(TZ)
-    date_str = local_dt.strftime("%-m/%-d/%y") # e.g., 1/12/26
     hour = local_dt.hour
+    
+    # If hour is before 7 AM, it belongs to the previous day's column
+    if hour < 7:
+        effective_dt = local_dt - dt.timedelta(days=1)
+    else:
+        effective_dt = local_dt
+        
+    date_str = effective_dt.strftime("%-m/%-d/%y") # e.g., 1/12/26
     
     # Hour to Row mapping: 7:00 (Row 5) ... 23:00 (Row 21), 0:00 (Row 22) ... 6:00 (Row 28)
     if hour >= 7:
