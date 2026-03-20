@@ -18,6 +18,10 @@ The **Hourly Logger** is a personal productivity tool that pings you every hour 
     - **SQLite (`queue.db`)**: Local persistence for reliable state management.
     - **Google Sheets**:
         - **Visual Grid**: A "Weekly" tracker that maps hours to rows and dates to columns, applying category-specific background colors.
+        - **Day Start Logic**: The grid follows a 7:00 AM day-start convention. Hours from 7:00 AM to 11:59 PM map to the current calendar date's column. Hours from 12:00 AM to 6:59 AM map to the *previous* calendar date's column, as they are considered part of the previous day's cycle.
+        - **Row Mapping**:
+            - 7:00 AM - 11:00 PM: Rows 5 - 21
+            - 12:00 AM - 6:00 AM: Rows 22 - 28
         - **Raw Log**: An append-only audit trail of every entry with precise timestamps and lag calculations.
 - **Resilient Sync**: Includes exponential backoff for Google Sheets API rate limits.
 
