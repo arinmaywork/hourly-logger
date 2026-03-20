@@ -42,9 +42,9 @@ SCOPES         = [
 CATEGORIES = {
     "🟢 Creative":     {"color": {"red": 0.0, "green": 1.0, "blue": 0.0}},
     "💎 Health":       {"color": {"red": 0.0, "green": 1.0, "blue": 1.0}},
-    "⚪️ Professional": {"color": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+    "🔘 Professional": {"color": {"red": 0.7, "green": 0.7, "blue": 0.7}},
     "🟡 Social":       {"color": {"red": 1.0, "green": 1.0, "blue": 0.0}},
-    "🔘 Other":        {"color": {"red": 0.7, "green": 0.7, "blue": 0.7}},
+    "⚪️ Other":        {"color": {"red": 1.0, "green": 1.0, "blue": 1.0}},
 }
 
 logging.basicConfig(

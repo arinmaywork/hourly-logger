@@ -123,6 +123,6 @@ sudo systemctl restart hourly-logger
 | :--- | :--- | :--- |
 | 🟢 Creative | Green | Learning, Building, Designing |
 | 💎 Health | Cyan | Sleep, Exercise, Meals |
-| ⚪️ Professional | White | Deep Work, Tasks, Meetings |
+| 🔘 Professional | Grey | Deep Work, Tasks, Meetings |
 | 🟡 Social | Yellow | Calls, Family, Hanging out |
-| 🔘 Other | Grey | Miscellaneous, Chores |
+| ⚪️ Other | White | Miscellaneous, Chores |
