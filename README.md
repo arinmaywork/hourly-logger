@@ -9,14 +9,14 @@ The **Hourly Logger** is a personal productivity tool that pings you every hour 
 
 ### Core Features
 - **Deterministic Scheduling**: Pings exactly at the start of every hour (HH:00).
-- **Missed Prompt Backfilling**: Automatically detects downtime and prompts you to fill in missed hours upon restart.
+- **Missed Prompt Backfilling**: Automatically detects downtime and prompts you to fill in missed hours upon restart. Duplicate-safe — restarting at the exact turn of an hour will never create double entries.
 - **Three-Step Logging Workflow**:
   1. **Category**: Choose from predefined categories (Creative, Health, Professional, Social, Other).
-  2. **Activity Tag**: Provide a short label (e.g., "Deep Work", "Exercise").
-  3. **Note (Optional)**: Add detailed context or `/skip` to leave blank.
-- **Edit Feature**: Correct mistakes by modifying any of the last 5 entries using the `/edit` command.
+  2. **Activity Tag**: Provide a short label (e.g., "Deep Work", "Exercise") — max 60 characters.
+  3. **Note (Optional)**: Add detailed context or `/skip` to leave blank — max 500 characters.
+- **Edit Feature**: Correct mistakes by modifying any of the last 5 entries using the `/edit` command. Use `/cancel` at the selection screen to return to normal entry mode.
 - **Dual-Layer Storage**:
-    - **SQLite (`queue.db`)**: Local persistence for reliable state management.
+    - **SQLite (`queue.db`)**: Local persistence for reliable state management. Each entry stores `tag` and `note` in separate columns alongside a combined `entry_text` field, and tracks whether the Google Sheets write succeeded (`sheets_synced`).
     - **Google Sheets**:
         - **Visual Grid**: A "Weekly" tracker that maps hours to rows and dates to columns, applying category-specific background colors.
         - **Day Start Logic**: The grid follows a 7:00 AM day-start convention. Hours from 7:00 AM to 11:59 PM map to the current calendar date's column. Hours from 12:00 AM to 6:59 AM map to the *previous* calendar date's column, as they are considered part of the previous day's cycle.
@@ -24,27 +24,32 @@ The **Hourly Logger** is a personal productivity tool that pings you every hour 
             - 7:00 AM - 11:00 PM: Rows 5 - 21
             - 12:00 AM - 6:00 AM: Rows 22 - 28
         - **Raw Log**: An append-only audit trail of every entry with precise timestamps and lag calculations.
-- **Resilient Sync**: Includes exponential backoff for Google Sheets API rate limits.
+- **Resilient Sync**: Exponential backoff for Google Sheets API rate limits (429) and generic network errors. Failed writes are flagged in the database and retried on demand via `/sync`.
+- **Non-Blocking Architecture**: All Google Sheets API calls run in a thread pool executor, keeping the asyncio event loop free to process Telegram updates at all times.
 
 ---
 
 ## 🕹 Usage & Commands
-Interact with the bot using these commands:
-- `/start`: Initialise the bot and view current configuration.
-- `/edit`: Lists the 5 most recent entries. Selecting one will restart the 3-step logging process for that specific hour and update both the SQLite database and Google Sheets.
-- `/status`: Displays statistics for the current queue (Pending, Completed, Skipped).
-- `/skip`: Skips the current active prompt.
-- `/sync`: Manual trigger to retry any failed Google Sheets writes.
+
+| Command | Description |
+| :--- | :--- |
+| `/start` | Initialise the bot and view available commands. |
+| `/status` | Displays queue statistics: Pending, Completed, Skipped, and Unsynced. |
+| `/edit` | Lists the 5 most recent entries. Select one to restart the 3-step logging flow for that hour, updating both SQLite and Google Sheets. |
+| `/skip` | On the **note** step: saves the entry without a note. On the **category** or **tag** step: skips the entire entry, marking it as skipped in the database. |
+| `/cancel` | Abandons the current in-progress flow without marking anything as skipped. The prompt remains pending and will be shown again. Also exits edit-selection mode and returns to normal entry mode. |
+| `/sync` | Retries all entries whose Google Sheets write previously failed. Reports success/failure counts. |
 
 ---
 
-## 🛠 Technical Architecture (Context for AI)
+## 🛠 Technical Architecture
+
 - **Language**: Python 3.10+
 - **Framework**: `python-telegram-bot` (v22+) using `asyncio`.
-- **Scheduler**: `APScheduler` (AsyncIOScheduler) with `cron` triggers.
-- **Database**: `sqlite3` with a `queue` table managing `pending`, `done`, and `skipped` states.
-- **Integrations**: `gspread` for Google Sheets API v4 interaction.
-- **State Machine**: A global `current_prompt` dictionary tracks the user's progress through the multi-step input.
+- **Scheduler**: `APScheduler` (AsyncIOScheduler) with `cron` triggers. Shuts down cleanly via `post_stop` lifecycle hook.
+- **Database**: `sqlite3` with a `queue` table managing `pending`, `done`, and `skipped` states. Columns: `id`, `scheduled_ts`, `submitted_ts`, `category`, `tag`, `note`, `entry_text`, `status`, `sheets_synced`.
+- **Integrations**: `gspread` (v6) for Google Sheets API v4 interaction. The authenticated client and spreadsheet object are cached at module level to avoid repeated round-trips. All gspread calls run via `asyncio.run_in_executor` so they never block the event loop.
+- **State Machine**: A global `current_prompt` dictionary tracks the user's progress through the multi-step input. Stages: `category` → `tag` → `note`, plus `edit_selection` for the `/edit` flow.
 
 ---
 
@@ -55,7 +60,7 @@ Interact with the bot using these commands:
    - Enable **Google Sheets API** and **Google Drive API**.
    - Create a **Service Account**, download the `credentials.json`, and share your Google Sheet with the service account email.
 3. **Google Sheet Structure**:
-   - A tab named **"Log"** (created automatically).
+   - A tab named **"Log"** (created automatically if missing).
    - A tab named **"Weekly"** (or your `GRID_SHEET_NAME`) with dates in Row 2 (format: `m/d/yy`).
 
 ---
@@ -88,6 +93,13 @@ CHAT_ID=your_personal_telegram_id
 SPREADSHEET_ID=your_google_sheet_id
 TIMEZONE=Asia/Kolkata
 GRID_SHEET_NAME=Weekly
+
+# Optional overrides (defaults shown)
+SHEET_NAME=Log
+CREDS_FILE=credentials.json
+DB_PATH=queue.db
+
+# Recommended: inline credentials instead of a file
 GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
 ```
 
