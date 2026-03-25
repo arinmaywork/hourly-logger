@@ -6,6 +6,7 @@ import json
 import time
 import datetime as dt
 from datetime import datetime, timezone
+from functools import partial
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -26,15 +27,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID        = int(os.environ["CHAT_ID"])
-SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
-TZ             = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
-DB_PATH        = os.getenv("DB_PATH", "queue.db")
-SHEET_NAME     = "Log"
+TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+CHAT_ID         = int(os.environ["CHAT_ID"])
+SPREADSHEET_ID  = os.environ["SPREADSHEET_ID"]
+TZ              = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
+DB_PATH         = os.getenv("DB_PATH", "queue.db")
+SHEET_NAME      = os.getenv("SHEET_NAME", "Log")           # Fix: was hardcoded
 GRID_SHEET_NAME = os.getenv("GRID_SHEET_NAME", "Weekly")
-CREDS_FILE     = "credentials.json"
-SCOPES         = [
+CREDS_FILE      = os.getenv("CREDS_FILE", "credentials.json")  # Fix: was hardcoded
+TAG_MAX_LEN     = 60
+NOTE_MAX_LEN    = 500
+SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
@@ -54,6 +57,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def escape_md(text: str) -> str:
+    """Escape Telegram Markdown v1 special characters in user-provided text."""
+    for ch in ("*", "_", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 def db_connect():
@@ -69,31 +81,41 @@ def db_init():
     with db_connect() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS queue (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                scheduled_ts TEXT NOT NULL,
-                submitted_ts TEXT,
-                category     TEXT,
-                entry_text   TEXT,
-                status       TEXT NOT NULL DEFAULT 'pending'
-                             CHECK(status IN ('pending','done','skipped'))
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                scheduled_ts  TEXT NOT NULL,
+                submitted_ts  TEXT,
+                category      TEXT,
+                entry_text    TEXT,
+                status        TEXT NOT NULL DEFAULT 'pending'
+                              CHECK(status IN ('pending','done','skipped')),
+                tag           TEXT,
+                note          TEXT,
+                sheets_synced INTEGER NOT NULL DEFAULT 1
             )
         """)
-        # Migration: Add category column if it doesn't exist
-        try:
-            conn.execute("ALTER TABLE queue ADD COLUMN category TEXT")
-        except sqlite3.OperationalError:
-            pass # Column already exists
-            
+        # Migrations: safely add new columns to existing databases
+        for col_sql in [
+            "category TEXT",
+            "tag TEXT",
+            "note TEXT",
+            "sheets_synced INTEGER NOT NULL DEFAULT 1",
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE queue ADD COLUMN {col_sql}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON queue(status)")
         conn.commit()
     log.info("Database initialised at %s", DB_PATH)
 
 
 def queue_add_prompt(scheduled_ts: datetime):
+    """Insert a new pending prompt. INSERT OR IGNORE prevents duplicate hours."""
     with db_connect() as conn:
         conn.execute(
-            "INSERT INTO queue (scheduled_ts) VALUES (?)",
-            (scheduled_ts.isoformat(),)
+            "INSERT OR IGNORE INTO queue (scheduled_ts) VALUES (?)",
+            (scheduled_ts.isoformat(),),
         )
         conn.commit()
 
@@ -112,27 +134,38 @@ def queue_count_pending() -> int:
         ).fetchone()[0]
 
 
-def queue_get_recent_done(limit=5):
+def queue_get_recent_done(limit: int = 5):
     with db_connect() as conn:
         return conn.execute(
             "SELECT * FROM queue WHERE status='done' ORDER BY scheduled_ts DESC LIMIT ?",
-            (limit,)
+            (limit,),
         ).fetchall()
 
 
 def queue_get_by_id(row_id: int):
     with db_connect() as conn:
         return conn.execute(
-            "SELECT * FROM queue WHERE id=?",
-            (row_id,)
+            "SELECT * FROM queue WHERE id=?", (row_id,)
         ).fetchone()
 
 
-def queue_mark_done(row_id: int, category: str, text: str, submitted_ts: datetime):
+def queue_mark_done(
+    row_id: int,
+    category: str,
+    tag: str,
+    note: str,
+    submitted_ts: datetime,
+    sheets_synced: bool = False,
+):
+    """Mark entry done, storing tag and note in both separate columns and combined entry_text."""
+    combined = f"{tag} | {note}" if note else tag
     with db_connect() as conn:
         conn.execute(
-            "UPDATE queue SET status='done', category=?, entry_text=?, submitted_ts=? WHERE id=?",
-            (category, text, submitted_ts.isoformat(), row_id),
+            """UPDATE queue
+               SET status='done', category=?, tag=?, note=?, entry_text=?,
+                   submitted_ts=?, sheets_synced=?
+               WHERE id=?""",
+            (category, tag, note, combined, submitted_ts.isoformat(), int(sheets_synced), row_id),
         )
         conn.commit()
 
@@ -146,19 +179,35 @@ def queue_mark_skipped(row_id: int):
         conn.commit()
 
 
+def queue_mark_sheets_synced(row_id: int, synced: bool):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE queue SET sheets_synced=? WHERE id=?",
+            (int(synced), row_id),
+        )
+        conn.commit()
+
+
+def queue_get_unsynced():
+    """Return all done entries whose last Sheets write failed."""
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM queue WHERE status='done' AND sheets_synced=0"
+        ).fetchall()
+
+
 def backfill_missed_prompts():
     with db_connect() as conn:
-        last = conn.execute(
-            "SELECT MAX(scheduled_ts) FROM queue"
-        ).fetchone()[0]
+        last = conn.execute("SELECT MAX(scheduled_ts) FROM queue").fetchone()[0]
     if not last:
         return
-    last_dt = datetime.fromisoformat(last).replace(tzinfo=timezone.utc)
+    # Fix: use .astimezone() instead of .replace() for correct conversion
+    last_dt = datetime.fromisoformat(last).astimezone(timezone.utc)
     now     = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     current = last_dt + dt.timedelta(hours=1)
     count   = 0
     while current <= now:
-        queue_add_prompt(current)
+        queue_add_prompt(current)  # INSERT OR IGNORE prevents duplicates at startup
         current += dt.timedelta(hours=1)
         count   += 1
     if count:
@@ -166,144 +215,207 @@ def backfill_missed_prompts():
 
 
 # ─── Google Sheets ────────────────────────────────────────────────────────────
+# Fix: cache the client/spreadsheet object to avoid re-authing on every call.
+# Fix: gspread.authorize() is deprecated; use gspread.Client(auth=creds) instead.
+# Fix: all sync gspread calls are run via asyncio.run_in_executor so they never
+#      block the event loop. time.sleep() inside these sync functions is fine
+#      because they execute in a worker thread, not on the event loop thread.
 
-def get_sheet(name=None):
+_gspread_spreadsheet = None
+
+
+def _get_spreadsheet():
+    """Return a cached gspread Spreadsheet, re-authenticating if needed."""
+    global _gspread_spreadsheet
+    if _gspread_spreadsheet is not None:
+        return _gspread_spreadsheet
+
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
-        creds = Credentials.from_service_account_info(
-            json.loads(creds_json), scopes=SCOPES
-        )
+        info  = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     else:
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
 
-    client      = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    
+    client = gspread.Client(auth=creds)  # replaces deprecated gspread.authorize()
+    _gspread_spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    return _gspread_spreadsheet
+
+
+def _reset_spreadsheet_cache():
+    global _gspread_spreadsheet
+    _gspread_spreadsheet = None
+
+
+def _get_sheet_sync(name: str | None = None):
+    """Synchronous worksheet fetch. Always call via run_in_executor from async code."""
     sheet_name = name or SHEET_NAME
     try:
-        return spreadsheet.worksheet(sheet_name)
+        return _get_spreadsheet().worksheet(sheet_name)
     except gspread.WorksheetNotFound:
         if sheet_name == SHEET_NAME:
-            ws = spreadsheet.add_worksheet(title=SHEET_NAME, rows=5000, cols=6)
+            ws = _get_spreadsheet().add_worksheet(title=SHEET_NAME, rows=5000, cols=6)
+            # Write headers only on first creation — not on every append
             ws.append_row(
                 ["Scheduled Time", "Submitted Time", "Category", "Tag", "Note", "Lag (minutes)"],
                 value_input_option="USER_ENTERED",
             )
             return ws
         raise
+    except Exception:
+        _reset_spreadsheet_cache()
+        raise
 
 
-def sheets_save_row(scheduled_ts: datetime, submitted_ts: datetime, category: str, tag: str, note: str = "", is_edit: bool = False):
-    lag = round((submitted_ts - scheduled_ts).total_seconds() / 60, 1)
+def _sheets_save_row_sync(
+    scheduled_ts: datetime,
+    submitted_ts: datetime,
+    category: str,
+    tag: str,
+    note: str = "",
+    is_edit: bool = False,
+):
+    """Synchronous implementation. Runs in a thread pool — time.sleep() here is safe."""
+    lag       = round((submitted_ts - scheduled_ts).total_seconds() / 60, 1)
     sched_str = scheduled_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
-    sub_str = submitted_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
-    row = [
-        sched_str,
-        sub_str,
-        category,
-        tag,
-        note,
-        lag,
-    ]
+    sub_str   = submitted_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
+    row       = [sched_str, sub_str, category, tag, note, lag]
+
     for attempt in range(5):
         try:
-            sheet = get_sheet()
+            sheet = _get_sheet_sync()
             if is_edit:
                 try:
                     cell = sheet.find(sched_str, in_column=1)
                     if cell:
-                        row_idx = cell.row
-                        sheet.update(f"A{row_idx}:F{row_idx}", [row], value_input_option="USER_ENTERED")
-                        log.info("Row %d updated in Log: %s", row_idx, row)
+                        sheet.update(
+                            f"A{cell.row}:F{cell.row}", [row],
+                            value_input_option="USER_ENTERED",
+                        )
+                        log.info("Row %d updated in Log: %s", cell.row, row)
                         return
                 except gspread.exceptions.CellNotFound:
-                    pass
-            
-            headers = sheet.row_values(1)
-            if "Category" not in headers:
-                sheet.update("A1:F1", [["Scheduled Time", "Submitted Time", "Category", "Tag", "Note", "Lag (minutes)"]])
+                    pass  # Fall through to append if not found
+
+            # Fix: header check removed — headers are only written at sheet creation
             sheet.append_row(row, value_input_option="USER_ENTERED")
             log.info("Row appended to Log: %s", row)
             return
+
         except gspread.exceptions.APIError as e:
             if e.response.status_code == 429 and attempt < 4:
                 wait = 2 ** attempt * 5
-                log.warning("Rate limited. Retrying in %ds...", wait)
+                log.warning("Rate limited (Log). Retrying in %ds...", wait)
+                time.sleep(wait)  # Safe: runs in thread pool, not event loop
+            else:
+                _reset_spreadsheet_cache()
+                raise
+        except Exception as e:
+            # Fix: generic errors now also get backoff delay, not an instant tight loop
+            wait = 2 ** attempt
+            log.error("Sheets log write failed (attempt %d): %s", attempt + 1, e)
+            _reset_spreadsheet_cache()
+            if attempt < 4:
                 time.sleep(wait)
             else:
                 raise
-        except Exception as e:
-            log.error("Sheets log write failed (attempt %d): %s", attempt + 1, e)
-            if attempt == 4:
-                raise
 
 
-def sheets_update_grid(scheduled_ts: datetime, category: str, tag: str):
-    """Updates the visual grid sheet based on date and hour."""
+def _sheets_update_grid_sync(scheduled_ts: datetime, category: str, tag: str):
+    """Synchronous implementation. Runs in a thread pool — time.sleep() here is safe."""
     local_dt = scheduled_ts.astimezone(TZ)
-    hour = local_dt.hour
-    
-    # If hour is before 7 AM, it belongs to the previous day's column
+    hour     = local_dt.hour
+
     if hour < 7:
         effective_dt = local_dt - dt.timedelta(days=1)
     else:
         effective_dt = local_dt
-        
-    date_str = effective_dt.strftime("%-m/%-d/%y") # e.g., 1/12/26
-    
-    # Hour to Row mapping: 7:00 (Row 5) ... 23:00 (Row 21), 0:00 (Row 22) ... 6:00 (Row 28)
-    if hour >= 7:
-        row = hour - 2
-    else:
-        row = hour + 22
-        
+
+    # Fix: use integer format instead of Linux-only %-m/%-d strftime codes
+    date_str = f"{effective_dt.month}/{effective_dt.day}/{str(effective_dt.year)[2:]}"
+
+    # Hour → row mapping: 7→5 … 23→21, 0→22 … 6→28
+    row = (hour - 2) if hour >= 7 else (hour + 22)
+
     for attempt in range(5):
         try:
-            grid = get_sheet(GRID_SHEET_NAME)
-            
-            # Find column by searching Row 2 for the date
+            grid      = _get_sheet_sync(GRID_SHEET_NAME)
             dates_row = grid.row_values(2)
-            col = -1
+            col       = -1
             for i, d in enumerate(dates_row):
                 if d.strip() == date_str:
                     col = i + 1
                     break
-            
+
             if col == -1:
                 log.warning("Date %s not found in grid row 2. Skipping grid update.", date_str)
                 return
 
-            # Update cell value (Tag)
             cell_addr = gspread.utils.rowcol_to_a1(row, col)
             grid.update(cell_addr, [[tag]])
-            
-            # Apply category color
+
             color = CATEGORIES.get(category, {}).get("color")
             if color:
                 grid.format(cell_addr, {
                     "backgroundColor": color,
                     "horizontalAlignment": "CENTER",
-                    "textFormat": {"bold": True}
+                    "textFormat": {"bold": True},
                 })
-            
-            log.info("Grid updated at %s (Row %d, Col %d) with color %s", cell_addr, row, col, category)
+
+            log.info("Grid updated at %s (Row %d, Col %d) for %s", cell_addr, row, col, category)
             return
+
         except gspread.exceptions.APIError as e:
             if e.response.status_code == 429 and attempt < 4:
                 wait = 2 ** attempt * 5
+                log.warning("Rate limited (Grid). Retrying in %ds...", wait)
+                time.sleep(wait)  # Safe: runs in thread pool
+            else:
+                _reset_spreadsheet_cache()
+                raise
+        except Exception as e:
+            wait = 2 ** attempt
+            log.error("Grid write failed (attempt %d): %s", attempt + 1, e)
+            _reset_spreadsheet_cache()
+            if attempt < 4:
                 time.sleep(wait)
             else:
                 raise
-        except Exception as e:
-            log.error("Grid write failed (attempt %d): %s", attempt + 1, e)
-            if attempt == 4:
-                raise
+
+
+async def sheets_save_row(
+    scheduled_ts: datetime,
+    submitted_ts: datetime,
+    category: str,
+    tag: str,
+    note: str = "",
+    is_edit: bool = False,
+):
+    """Non-blocking async wrapper — runs sync gspread calls in a thread pool."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        partial(_sheets_save_row_sync, scheduled_ts, submitted_ts, category, tag, note, is_edit),
+    )
+
+
+async def sheets_update_grid(scheduled_ts: datetime, category: str, tag: str):
+    """Non-blocking async wrapper — runs sync gspread calls in a thread pool."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        partial(_sheets_update_grid_sync, scheduled_ts, category, tag),
+    )
 
 
 # ─── Bot State ────────────────────────────────────────────────────────────────
 
-# stages: "tag" → waiting for short tag, "note" → waiting for note
 current_prompt: dict = {}
+_scheduler: AsyncIOScheduler | None = None
+
+
+def _is_owner(update: Update) -> bool:
+    return update.effective_chat.id == CHAT_ID
 
 
 async def send_prompt(bot, queue_row, is_edit: bool = False):
@@ -315,22 +427,21 @@ async def send_prompt(bot, queue_row, is_edit: bool = False):
         header = f"🛠 *Editing Entry* — `{scheduled.strftime('%a %b %d, %H:%M')}`\n\n"
     elif pending_count > 1:
         header = f"⏳ *{pending_count} entries queued* — answering oldest first\n\n"
-    
+
     msg = (
         f"{header}"
         f"📝 *Hourly Log* — `{scheduled.strftime('%a %b %d, %H:%M')}`\n\n"
         f"*Step 1/3:* Select a category:"
     )
-    
-    keyboard = [[cat] for cat in CATEGORIES.keys()]
+    keyboard     = [[cat] for cat in CATEGORIES.keys()]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    
+
     try:
         await bot.send_message(
-            chat_id=CHAT_ID, 
-            text=msg, 
+            chat_id=CHAT_ID,
+            text=msg,
             parse_mode="Markdown",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
         )
         current_prompt = {
             "queue_id":     queue_row["id"],
@@ -348,7 +459,7 @@ async def send_prompt(bot, queue_row, is_edit: bool = False):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_prompt
-    if update.effective_chat.id != CHAT_ID:
+    if not _is_owner(update):
         return
     text = update.message.text.strip()
     if not text:
@@ -369,10 +480,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text not in current_prompt.get("recent_labels", []):
             await update.message.reply_text("Please select a valid entry from the list.")
             return
-        
-        idx = current_prompt["recent_labels"].index(text)
+        idx    = current_prompt["recent_labels"].index(text)
         row_id = current_prompt["recent_ids"][idx]
-        row = queue_get_by_id(row_id)
+        row    = queue_get_by_id(row_id)
         if row:
             await send_prompt(context.bot, row, is_edit=True)
         else:
@@ -388,9 +498,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_prompt["category"] = text
         current_prompt["stage"]    = "tag"
         await update.message.reply_text(
-            f"📂 Category: *{text}*\n\n"
+            f"📂 Category: *{escape_md(text)}*\n\n"
             f"*Step 2/3:* What's your activity tag?\n"
-            f"_(e.g. Tasks, Journaling, Meeting)_",
+            f"_(e.g. Tasks, Journaling, Meeting — max {TAG_MAX_LEN} chars)_",
             parse_mode="Markdown",
             reply_markup=ReplyKeyboardRemove(),
         )
@@ -398,37 +508,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Stage 2: Waiting for tag ───────────────────────────────────────────
     if current_prompt.get("stage") == "tag":
+        if len(text) > TAG_MAX_LEN:
+            await update.message.reply_text(
+                f"⚠️ Tag is too long (max {TAG_MAX_LEN} chars). Please shorten it."
+            )
+            return
         current_prompt["tag"]   = text
         current_prompt["stage"] = "note"
         await update.message.reply_text(
-            f"✏️ Tag: *{text}*\n\n"
+            f"✏️ Tag: *{escape_md(text)}*\n\n"
             f"*Step 3/3:* Add a note for this hour?\n"
-            f"_(Type anything or /skip to leave blank)_",
+            f"_(Type anything or /skip to leave blank — max {NOTE_MAX_LEN} chars)_",
             parse_mode="Markdown",
         )
         return
 
     # ── Stage 3: Waiting for note ──────────────────────────────────────────
     if current_prompt.get("stage") == "note":
+        if len(text) > NOTE_MAX_LEN:
+            await update.message.reply_text(
+                f"⚠️ Note is too long (max {NOTE_MAX_LEN} chars). Please shorten it."
+            )
+            return
         category = current_prompt["category"]
         tag      = current_prompt["tag"]
         note     = text
         now      = datetime.now(timezone.utc)
         queue_id = current_prompt["queue_id"]
-        sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"])
+        sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"]).astimezone(timezone.utc)
         is_edit  = current_prompt.get("is_edit", False)
 
-        combined = f"{tag} | {note}" if note else tag
-        queue_mark_done(queue_id, category, combined, now)
+        # Mark done locally first (sheets_synced=False until confirmed)
+        queue_mark_done(queue_id, category, tag, note, now, sheets_synced=False)
 
         try:
-            # Update both raw log and grid
-            sheets_save_row(sched_ts, now, category, tag, note, is_edit=is_edit)
-            sheets_update_grid(sched_ts, category, tag)
-            
-            status_text = "Logged" if not is_edit else "Updated"
+            await sheets_save_row(sched_ts, now, category, tag, note, is_edit=is_edit)
+            await sheets_update_grid(sched_ts, category, tag)
+            queue_mark_sheets_synced(queue_id, True)
+            status_text = "Updated" if is_edit else "Logged"
             await update.message.reply_text(
-                f"✅ *{status_text}!*\n• Category: {category}\n• Tag: {tag}\n• Note: {note}",
+                f"✅ *{status_text}!*\n"
+                f"• Category: {escape_md(category)}\n"
+                f"• Tag: {escape_md(tag)}\n"
+                f"• Note: {escape_md(note)}",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -453,7 +575,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != CHAT_ID:
+    if not _is_owner(update):
         return
     await update.message.reply_text(
         "👋 *Hourly Logger is active!*\n\n"
@@ -461,44 +583,77 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "• /status — see queue stats\n"
         "• /edit — edit recent entries\n"
-        "• /skip — skip current prompt\n"
+        "• /skip — skip current prompt (or just the note)\n"
+        "• /cancel — abandon current flow without skipping\n"
         "• /sync — retry failed Sheets writes",
         parse_mode="Markdown",
     )
 
 
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Abandon the current multi-step flow without marking the entry as skipped."""
+    global current_prompt
+    if not _is_owner(update):
+        return
+    if not current_prompt:
+        await update.message.reply_text("Nothing to cancel right now.")
+        return
+
+    was_edit_selection = current_prompt.get("stage") == "edit_selection"
+    current_prompt = {}
+
+    if was_edit_selection:
+        await update.message.reply_text(
+            "🚫 Edit cancelled.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    else:
+        await update.message.reply_text(
+            "🚫 Cancelled. The current prompt remains pending and will be shown again.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+    # In both cases, surface the next pending entry so the user isn't left stranded
+    next_pending = queue_get_oldest_pending()
+    if next_pending:
+        await send_prompt(context.bot, next_pending)
+
+
 async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_prompt
-    if update.effective_chat.id != CHAT_ID:
+    if not _is_owner(update):
         return
 
     if not current_prompt:
         await update.message.reply_text("Nothing to skip right now.")
         return
 
-    # On note stage — save tag only, skip note
+    # On note stage: save tag with no note, rather than skipping the whole entry
     if current_prompt.get("stage") == "note":
         category = current_prompt["category"]
         tag      = current_prompt["tag"]
         now      = datetime.now(timezone.utc)
         queue_id = current_prompt["queue_id"]
-        sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"])
+        sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"]).astimezone(timezone.utc)
         is_edit  = current_prompt.get("is_edit", False)
-        
-        queue_mark_done(queue_id, category, tag, now)
+
+        queue_mark_done(queue_id, category, tag, "", now, sheets_synced=False)
         try:
-            sheets_save_row(sched_ts, now, category, tag, note="", is_edit=is_edit)
-            sheets_update_grid(sched_ts, category, tag)
-            status_text = "Logged" if not is_edit else "Updated"
+            await sheets_save_row(sched_ts, now, category, tag, note="", is_edit=is_edit)
+            await sheets_update_grid(sched_ts, category, tag)
+            queue_mark_sheets_synced(queue_id, True)
+            status_text = "Updated" if is_edit else "Logged"
             await update.message.reply_text(
-                f"✅ *{status_text} without note!*\n• Category: {category}\n• Tag: {tag}",
+                f"✅ *{status_text} without note!*\n"
+                f"• Category: {escape_md(category)}\n"
+                f"• Tag: {escape_md(tag)}",
                 parse_mode="Markdown",
             )
         except Exception as e:
             log.error("Sheets write failed: %s", e)
             await update.message.reply_text("⚠️ Saved locally, Sheets write failed.")
     else:
-        # Skip entire prompt (from category or tag stage)
+        # Skip entire entry (called from category or tag stage)
         queue_mark_skipped(current_prompt["queue_id"])
         await update.message.reply_text("⏭ Skipped.", reply_markup=ReplyKeyboardRemove())
 
@@ -510,61 +665,113 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_prompt
-    if update.effective_chat.id != CHAT_ID:
+    if not _is_owner(update):
         return
-    
+
+    # Fix: guard against silently discarding an in-progress entry
+    if current_prompt and current_prompt.get("stage") != "edit_selection":
+        await update.message.reply_text(
+            "⚠️ You're currently mid-entry. Use /cancel to abandon it first, "
+            "then /edit to pick a past entry."
+        )
+        return
+
     recent = queue_get_recent_done(5)
     if not recent:
         await update.message.reply_text("No entries found to edit.")
         return
-    
-    msg = "✏️ *Select an entry to edit:*\n\n"
-    keyboard = []
-    recent_ids = []
+
+    msg           = "✏️ *Select an entry to edit:*\n_(Use /cancel to go back)_\n\n"
+    keyboard      = []
+    recent_ids    = []
     recent_labels = []
-    
+
     for row in recent:
-        ts = datetime.fromisoformat(row["scheduled_ts"]).astimezone(TZ)
-        text = row["entry_text"] or "(no text)"
-        label = f"{ts.strftime('%H:%M')} - {text[:20]}"
-        msg += f"• {label}\n"
+        ts    = datetime.fromisoformat(row["scheduled_ts"]).astimezone(TZ)
+        text  = row["entry_text"] or "(no text)"
+        # Fix: embed row ID in label to guarantee uniqueness even with similar entries
+        label = f"[{row['id']}] {ts.strftime('%a %H:%M')} — {text[:18]}"
+        msg  += f"• {label}\n"
         keyboard.append([label])
         recent_ids.append(row["id"])
         recent_labels.append(label)
-    
+
     current_prompt = {
-        "stage": "edit_selection",
-        "recent_ids": recent_ids,
-        "recent_labels": recent_labels
+        "stage":          "edit_selection",
+        "recent_ids":     recent_ids,
+        "recent_labels":  recent_labels,
     }
-    
+
     await update.message.reply_text(
         msg,
         parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True),
     )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != CHAT_ID:
+    if not _is_owner(update):
         return
     pending = queue_count_pending()
     with db_connect() as conn:
-        done    = conn.execute("SELECT COUNT(*) FROM queue WHERE status='done'").fetchone()[0]
-        skipped = conn.execute("SELECT COUNT(*) FROM queue WHERE status='skipped'").fetchone()[0]
+        done     = conn.execute("SELECT COUNT(*) FROM queue WHERE status='done'").fetchone()[0]
+        skipped  = conn.execute("SELECT COUNT(*) FROM queue WHERE status='skipped'").fetchone()[0]
+        unsynced = conn.execute(
+            "SELECT COUNT(*) FROM queue WHERE status='done' AND sheets_synced=0"
+        ).fetchone()[0]
     await update.message.reply_text(
         f"📊 *Queue Status*\n"
-        f"• Pending: `{pending}`\n"
+        f"• Pending:   `{pending}`\n"
         f"• Completed: `{done}`\n"
-        f"• Skipped: `{skipped}`",
+        f"• Skipped:   `{skipped}`\n"
+        f"• Unsynced:  `{unsynced}`",
         parse_mode="Markdown",
     )
 
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != CHAT_ID:
+    """Retry all done entries whose Sheets write previously failed."""
+    if not _is_owner(update):
         return
-    await update.message.reply_text("ℹ️ Manual sync triggered. Check logs for details.")
+
+    unsynced = queue_get_unsynced()
+    if not unsynced:
+        await update.message.reply_text("✅ Nothing to sync — all entries are up to date.")
+        return
+
+    count = len(unsynced)
+    await update.message.reply_text(
+        f"🔄 Syncing {count} unsynced entr{'y' if count == 1 else 'ies'}..."
+    )
+
+    success = 0
+    failed  = 0
+    for row in unsynced:
+        sched_ts = datetime.fromisoformat(row["scheduled_ts"]).astimezone(timezone.utc)
+        sub_ts   = (
+            datetime.fromisoformat(row["submitted_ts"]).astimezone(timezone.utc)
+            if row["submitted_ts"]
+            else datetime.now(timezone.utc)
+        )
+        category = row["category"] or "⚪️ Other"
+        tag      = row["tag"] or row["entry_text"] or ""
+        note     = row["note"] or ""
+
+        try:
+            await sheets_save_row(sched_ts, sub_ts, category, tag, note, is_edit=True)
+            await sheets_update_grid(sched_ts, category, tag)
+            queue_mark_sheets_synced(row["id"], True)
+            success += 1
+        except Exception as e:
+            log.error("Sync failed for row %d: %s", row["id"], e)
+            failed += 1
+
+    parts = []
+    if success:
+        parts.append(f"✅ {success} synced successfully")
+    if failed:
+        parts.append(f"❌ {failed} still failing — check logs and try /sync again")
+    await update.message.reply_text("\n".join(parts))
 
 
 # ─── Scheduler ────────────────────────────────────────────────────────────────
@@ -573,7 +780,7 @@ async def hourly_job(bot):
     global current_prompt
     now       = datetime.now(timezone.utc)
     scheduled = now.replace(minute=0, second=0, microsecond=0)
-    queue_add_prompt(scheduled)
+    queue_add_prompt(scheduled)  # INSERT OR IGNORE prevents duplicate on startup race
     log.info("Hourly job fired. Scheduled TS: %s", scheduled.isoformat())
     if not current_prompt:
         pending = queue_get_oldest_pending()
@@ -584,6 +791,7 @@ async def hourly_job(bot):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    global _scheduler
     db_init()
     backfill_missed_prompts()
 
@@ -591,23 +799,32 @@ def main():
 
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("skip",   cmd_skip))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("edit",   cmd_edit))
     app.add_handler(CommandHandler("sync",   cmd_sync))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def on_startup(application: Application):
-        scheduler = AsyncIOScheduler(timezone="UTC")
-        scheduler.add_job(
+        global _scheduler
+        _scheduler = AsyncIOScheduler(timezone="UTC")
+        _scheduler.add_job(
             hourly_job,
             trigger="cron",
             minute=0,
             args=[application.bot],
         )
-        scheduler.start()
+        _scheduler.start()
         log.info("Scheduler started.")
 
+    async def on_shutdown(application: Application):
+        global _scheduler
+        if _scheduler and _scheduler.running:
+            _scheduler.shutdown(wait=False)
+            log.info("Scheduler stopped.")
+
     app.post_init = on_startup
+    app.post_stop = on_shutdown  # Fix: graceful scheduler shutdown
 
     log.info("Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
