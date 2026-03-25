@@ -112,6 +112,22 @@ def queue_count_pending() -> int:
         ).fetchone()[0]
 
 
+def queue_get_recent_done(limit=5):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM queue WHERE status='done' ORDER BY scheduled_ts DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+
+
+def queue_get_by_id(row_id: int):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM queue WHERE id=?",
+            (row_id,)
+        ).fetchone()
+
+
 def queue_mark_done(row_id: int, category: str, text: str, submitted_ts: datetime):
     with db_connect() as conn:
         conn.execute(
@@ -177,11 +193,13 @@ def get_sheet(name=None):
         raise
 
 
-def sheets_append_row(scheduled_ts: datetime, submitted_ts: datetime, category: str, tag: str, note: str = ""):
+def sheets_save_row(scheduled_ts: datetime, submitted_ts: datetime, category: str, tag: str, note: str = "", is_edit: bool = False):
     lag = round((submitted_ts - scheduled_ts).total_seconds() / 60, 1)
+    sched_str = scheduled_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
+    sub_str = submitted_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
     row = [
-        scheduled_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M"),
-        submitted_ts.astimezone(TZ).strftime("%Y-%m-%d %H:%M"),
+        sched_str,
+        sub_str,
         category,
         tag,
         note,
@@ -190,6 +208,17 @@ def sheets_append_row(scheduled_ts: datetime, submitted_ts: datetime, category: 
     for attempt in range(5):
         try:
             sheet = get_sheet()
+            if is_edit:
+                try:
+                    cell = sheet.find(sched_str, in_column=1)
+                    if cell:
+                        row_idx = cell.row
+                        sheet.update(f"A{row_idx}:F{row_idx}", [row], value_input_option="USER_ENTERED")
+                        log.info("Row %d updated in Log: %s", row_idx, row)
+                        return
+                except gspread.exceptions.CellNotFound:
+                    pass
+            
             headers = sheet.row_values(1)
             if "Category" not in headers:
                 sheet.update("A1:F1", [["Scheduled Time", "Submitted Time", "Category", "Tag", "Note", "Lag (minutes)"]])
@@ -277,14 +306,16 @@ def sheets_update_grid(scheduled_ts: datetime, category: str, tag: str):
 current_prompt: dict = {}
 
 
-async def send_prompt(bot, queue_row):
+async def send_prompt(bot, queue_row, is_edit: bool = False):
     global current_prompt
     scheduled     = datetime.fromisoformat(queue_row["scheduled_ts"]).astimezone(TZ)
     pending_count = queue_count_pending()
-    header = (
-        f"⏳ *{pending_count} entries queued* — answering oldest first\n\n"
-        if pending_count > 1 else ""
-    )
+    header = ""
+    if is_edit:
+        header = f"🛠 *Editing Entry* — `{scheduled.strftime('%a %b %d, %H:%M')}`\n\n"
+    elif pending_count > 1:
+        header = f"⏳ *{pending_count} entries queued* — answering oldest first\n\n"
+    
     msg = (
         f"{header}"
         f"📝 *Hourly Log* — `{scheduled.strftime('%a %b %d, %H:%M')}`\n\n"
@@ -307,6 +338,7 @@ async def send_prompt(bot, queue_row):
             "stage":        "category",
             "category":     None,
             "tag":          None,
+            "is_edit":      is_edit,
         }
     except (NetworkError, TelegramError) as e:
         log.error("Failed to send prompt: %s", e)
@@ -330,6 +362,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "✅ No pending entries right now. I'll prompt you at the next hour!"
             )
+        return
+
+    # ── Stage: edit_selection ─────────────────────────────────────────────
+    if current_prompt.get("stage") == "edit_selection":
+        if text not in current_prompt.get("recent_labels", []):
+            await update.message.reply_text("Please select a valid entry from the list.")
+            return
+        
+        idx = current_prompt["recent_labels"].index(text)
+        row_id = current_prompt["recent_ids"][idx]
+        row = queue_get_by_id(row_id)
+        if row:
+            await send_prompt(context.bot, row, is_edit=True)
+        else:
+            await update.message.reply_text("Error finding that entry.")
+            current_prompt = {}
         return
 
     # ── Stage 1: Waiting for category ─────────────────────────────────────
@@ -368,17 +416,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now      = datetime.now(timezone.utc)
         queue_id = current_prompt["queue_id"]
         sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"])
+        is_edit  = current_prompt.get("is_edit", False)
 
         combined = f"{tag} | {note}" if note else tag
         queue_mark_done(queue_id, category, combined, now)
 
         try:
             # Update both raw log and grid
-            sheets_append_row(sched_ts, now, category, tag, note)
+            sheets_save_row(sched_ts, now, category, tag, note, is_edit=is_edit)
             sheets_update_grid(sched_ts, category, tag)
             
+            status_text = "Logged" if not is_edit else "Updated"
             await update.message.reply_text(
-                f"✅ *Logged!*\n• Category: {category}\n• Tag: {tag}\n• Note: {note}",
+                f"✅ *{status_text}!*\n• Category: {category}\n• Tag: {tag}\n• Note: {note}",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -410,6 +460,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I'll message you every hour for your log entry.\n\n"
         "Commands:\n"
         "• /status — see queue stats\n"
+        "• /edit — edit recent entries\n"
         "• /skip — skip current prompt\n"
         "• /sync — retry failed Sheets writes",
         parse_mode="Markdown",
@@ -432,13 +483,15 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now      = datetime.now(timezone.utc)
         queue_id = current_prompt["queue_id"]
         sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"])
+        is_edit  = current_prompt.get("is_edit", False)
         
         queue_mark_done(queue_id, category, tag, now)
         try:
-            sheets_append_row(sched_ts, now, category, tag, note="")
+            sheets_save_row(sched_ts, now, category, tag, note="", is_edit=is_edit)
             sheets_update_grid(sched_ts, category, tag)
+            status_text = "Logged" if not is_edit else "Updated"
             await update.message.reply_text(
-                f"✅ *Logged without note!*\n• Category: {category}\n• Tag: {tag}",
+                f"✅ *{status_text} without note!*\n• Category: {category}\n• Tag: {tag}",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -453,6 +506,43 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     next_pending = queue_get_oldest_pending()
     if next_pending:
         await send_prompt(context.bot, next_pending)
+
+
+async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global current_prompt
+    if update.effective_chat.id != CHAT_ID:
+        return
+    
+    recent = queue_get_recent_done(5)
+    if not recent:
+        await update.message.reply_text("No entries found to edit.")
+        return
+    
+    msg = "✏️ *Select an entry to edit:*\n\n"
+    keyboard = []
+    recent_ids = []
+    recent_labels = []
+    
+    for row in recent:
+        ts = datetime.fromisoformat(row["scheduled_ts"]).astimezone(TZ)
+        text = row["entry_text"] or "(no text)"
+        label = f"{ts.strftime('%H:%M')} - {text[:20]}"
+        msg += f"• {label}\n"
+        keyboard.append([label])
+        recent_ids.append(row["id"])
+        recent_labels.append(label)
+    
+    current_prompt = {
+        "stage": "edit_selection",
+        "recent_ids": recent_ids,
+        "recent_labels": recent_labels
+    }
+    
+    await update.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -502,6 +592,7 @@ def main():
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("skip",   cmd_skip))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("edit",   cmd_edit))
     app.add_handler(CommandHandler("sync",   cmd_sync))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

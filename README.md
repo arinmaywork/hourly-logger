@@ -14,6 +14,7 @@ The **Hourly Logger** is a personal productivity tool that pings you every hour 
   1. **Category**: Choose from predefined categories (Creative, Health, Professional, Social, Other).
   2. **Activity Tag**: Provide a short label (e.g., "Deep Work", "Exercise").
   3. **Note (Optional)**: Add detailed context or `/skip` to leave blank.
+- **Edit Feature**: Correct mistakes by modifying any of the last 5 entries using the `/edit` command.
 - **Dual-Layer Storage**:
     - **SQLite (`queue.db`)**: Local persistence for reliable state management.
     - **Google Sheets**:
@@ -24,6 +25,16 @@ The **Hourly Logger** is a personal productivity tool that pings you every hour 
             - 12:00 AM - 6:00 AM: Rows 22 - 28
         - **Raw Log**: An append-only audit trail of every entry with precise timestamps and lag calculations.
 - **Resilient Sync**: Includes exponential backoff for Google Sheets API rate limits.
+
+---
+
+## 🕹 Usage & Commands
+Interact with the bot using these commands:
+- `/start`: Initialise the bot and view current configuration.
+- `/edit`: Lists the 5 most recent entries. Selecting one will restart the 3-step logging process for that specific hour and update both the SQLite database and Google Sheets.
+- `/status`: Displays statistics for the current queue (Pending, Completed, Skipped).
+- `/skip`: Skips the current active prompt.
+- `/sync`: Manual trigger to retry any failed Google Sheets writes.
 
 ---
 
