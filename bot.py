@@ -206,28 +206,75 @@ def queue_get_unsynced():
         ).fetchall()
 
 
+def _ts_param(ts: datetime) -> str:
+    """Return a timestamp string normalised to bare UTC for SQLite strftime comparison.
+
+    Strips the '+00:00' offset so it matches entries stored either with or without
+    the timezone suffix.  All stored timestamps are UTC so the offset is irrelevant.
+    """
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def queue_category_breakdown(since_ts: datetime) -> tuple[dict[str, int], int]:
     """Return (breakdown, total_done) for done entries on or after since_ts.
 
     breakdown   — {category: count} for entries with a non-NULL category, sorted by count desc.
     total_done  — true count of ALL done entries in the period, including uncategorised ones.
                   Using breakdown sum would silently undercount entries with NULL category.
+
+    Uses strftime() on both sides of the comparison so entries stored with OR without
+    the '+00:00' timezone suffix are handled consistently.
     """
+    param = _ts_param(since_ts)
     with db_connect() as conn:
         rows = conn.execute(
             """SELECT category, COUNT(*) as cnt
                FROM queue
-               WHERE status='done' AND scheduled_ts >= ?
+               WHERE status='done'
+                 AND strftime('%Y-%m-%dT%H:%M:%S', scheduled_ts) >= ?
                GROUP BY category
                ORDER BY cnt DESC""",
-            (since_ts.isoformat(),),
+            (param,),
         ).fetchall()
         total_done = conn.execute(
-            "SELECT COUNT(*) FROM queue WHERE status='done' AND scheduled_ts >= ?",
-            (since_ts.isoformat(),),
+            """SELECT COUNT(*) FROM queue
+               WHERE status='done'
+                 AND strftime('%Y-%m-%dT%H:%M:%S', scheduled_ts) >= ?""",
+            (param,),
         ).fetchone()[0]
     breakdown = {row["category"]: row["cnt"] for row in rows if row["category"]}
     return breakdown, total_done
+
+
+def queue_daily_counts_week(week_start_utc: datetime, now_utc: datetime) -> list[tuple[str, int]]:
+    """Return a list of (day_label, done_count) for each day Mon→today (local TZ).
+
+    Each day runs from 00:00 local time to 23:59:59 local time.
+    Uses strftime() for consistent comparison regardless of stored tz suffix.
+    """
+    results = []
+    with db_connect() as conn:
+        # Iterate calendar days from week_start_local to today
+        day_local = week_start_utc.astimezone(TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        today_local = now_utc.astimezone(TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        while day_local <= today_local:
+            day_start_utc = day_local.astimezone(timezone.utc)
+            day_end_local = day_local.replace(hour=23, minute=59, second=59)
+            day_end_utc   = day_end_local.astimezone(timezone.utc)
+            count = conn.execute(
+                """SELECT COUNT(*) FROM queue
+                   WHERE status='done'
+                     AND strftime('%Y-%m-%dT%H:%M:%S', scheduled_ts) >= ?
+                     AND strftime('%Y-%m-%dT%H:%M:%S', scheduled_ts) <= ?""",
+                (_ts_param(day_start_utc), _ts_param(day_end_utc)),
+            ).fetchone()[0]
+            results.append((day_local.strftime("%a %-d %b"), count))
+            day_local += dt.timedelta(days=1)
+    return results
 
 
 def backfill_missed_prompts():
@@ -846,41 +893,54 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT COUNT(*) FROM queue WHERE status='done' AND sheets_synced=0"
         ).fetchone()[0]
 
-    now_local = datetime.now(TZ)
+    now_utc   = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(TZ)
 
     # Weekly breakdown — Monday 00:00 local time to now
     week_start_local = (now_local - dt.timedelta(days=now_local.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    week_start_utc          = week_start_local.astimezone(timezone.utc)
-    week_data, total_week   = queue_category_breakdown(week_start_utc)
+    week_start_utc        = week_start_local.astimezone(timezone.utc)
+    week_data, total_week = queue_category_breakdown(week_start_utc)
+
+    # Per-day counts for the current week (for quick sanity check)
+    daily_counts = queue_daily_counts_week(week_start_utc, now_utc)
+    daily_line   = "  " + "  ".join(
+        f"`{label}:{count}h`" for label, count in daily_counts
+    )
 
     # Yearly breakdown — 1 Jan 00:00 local time to now
     year_start_local = now_local.replace(
         month=1, day=1, hour=0, minute=0, second=0, microsecond=0
     )
-    year_start_utc          = year_start_local.astimezone(timezone.utc)
-    year_data, total_year   = queue_category_breakdown(year_start_utc)
+    year_start_utc        = year_start_local.astimezone(timezone.utc)
+    year_data, total_year = queue_category_breakdown(year_start_utc)
 
     def format_breakdown(data: dict, total_done: int) -> str:
         """Render a bar-chart breakdown.
 
-        total_done is the TRUE count of all done entries in the period (including
-        any uncategorised ones). Percentages are calculated relative to categorised
-        entries only; if the sums differ, a note is appended.
-        Rounding uses the largest-remainder method so percentages always sum to 100%.
+        Percentages are calculated relative to total_done (all logged entries, including
+        any uncategorised ones) so they represent the true fraction of time in each
+        category.  Rounding uses the largest-remainder method so values always sum to 100%
+        when every entry is categorised.
         """
-        if not data:
+        if total_done == 0:
             return "_No entries yet._"
 
-        bar_width       = 10
-        cat_total       = sum(data.values())
-        uncategorised   = total_done - cat_total  # entries with NULL category
+        bar_width     = 10
+        cat_total     = sum(data.values())
+        uncategorised = total_done - cat_total  # entries with NULL category
 
-        # Largest-remainder rounding — guarantees pcts sum exactly to 100
-        exact    = {cat: cnt / cat_total * 100 for cat, cnt in data.items()}
-        floored  = {cat: int(p) for cat, p in exact.items()}
-        deficit  = 100 - sum(floored.values())
+        # Build full list including a synthetic "Uncategorised" bucket so
+        # percentages are computed relative to total_done.
+        all_items: dict[str, int] = dict(data)
+        if uncategorised:
+            all_items["⚠️ Uncategorised"] = uncategorised
+
+        # Largest-remainder rounding relative to total_done
+        exact   = {cat: cnt / total_done * 100 for cat, cnt in all_items.items()}
+        floored = {cat: int(p) for cat, p in exact.items()}
+        deficit = 100 - sum(floored.values())
         for cat in sorted(exact, key=lambda c: -(exact[c] % 1))[:deficit]:
             floored[cat] += 1
 
@@ -892,11 +952,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"{cat}\n  `{bar}` {pct}% ({count}h)")
 
         if uncategorised:
-            lines.append(f"_⚠️ {uncategorised}h logged without a category_")
+            pct = floored["⚠️ Uncategorised"]
+            lines.append(f"_⚠️ {uncategorised}h logged without a category ({pct}%)_")
 
         return "\n".join(lines)
 
-    week_label = f"Mon {week_start_local.strftime('%-d %b')} — now ({total_week}h)"
+    week_label = (
+        f"Mon {week_start_local.day} {week_start_local.strftime('%b')} — now"
+        f" ({total_week}h)"
+    )
     year_label = f"1 Jan {now_local.year} — now ({total_year}h)"
 
     await update.message.reply_text(
@@ -906,6 +970,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Skipped:   `{skipped}`\n"
         f"• Unsynced:  `{unsynced}`\n\n"
         f"📅 *This Week* — _{week_label}_\n"
+        f"{daily_line}\n"
         f"{format_breakdown(week_data, total_week)}\n\n"
         f"📆 *This Year* — _{year_label}_\n"
         f"{format_breakdown(year_data, total_year)}",
