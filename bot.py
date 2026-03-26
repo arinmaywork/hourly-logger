@@ -45,7 +45,7 @@ SCOPES = [
 CATEGORIES = {
     "🟢 Creative":     {"color": {"red": 0.0, "green": 1.0, "blue": 0.0}},
     "💎 Health":       {"color": {"red": 0.0, "green": 1.0, "blue": 1.0}},
-    "🔘 Professional": {"color": {"red": 0.7, "green": 0.7, "blue": 0.7}},
+    "🔘 Professional": {"color": {"red": 0.8, "green": 0.8, "blue": 0.8}},  # #CCCCCC
     "🟡 Social":       {"color": {"red": 1.0, "green": 1.0, "blue": 0.0}},
     "⚪️ Other":        {"color": {"red": 1.0, "green": 1.0, "blue": 1.0}},
 }
@@ -836,28 +836,44 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT COUNT(*) FROM queue WHERE status='done' AND sheets_synced=0"
         ).fetchone()[0]
 
-    # Weekly category breakdown — Monday 00:00 in user's timezone to now
-    now_local        = datetime.now(TZ)
+    now_local = datetime.now(TZ)
+
+    # Weekly breakdown — Monday 00:00 local time to now
     week_start_local = (now_local - dt.timedelta(days=now_local.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    week_start_utc   = week_start_local.astimezone(timezone.utc)
-    breakdown        = queue_category_breakdown(week_start_utc)
-    total_week       = sum(breakdown.values())
+    week_start_utc = week_start_local.astimezone(timezone.utc)
+    week_data      = queue_category_breakdown(week_start_utc)
+    total_week     = sum(week_data.values())
 
-    if breakdown:
-        bar_width = 10  # chars per bar
-        breakdown_lines = []
-        for cat, count in breakdown.items():
-            pct      = round(count / total_week * 100)
-            filled   = round(pct / 100 * bar_width)
-            bar      = "█" * filled + "░" * (bar_width - filled)
-            breakdown_lines.append(f"{cat}\n  `{bar}` {pct}% ({count}h)")
-        breakdown_text = "\n".join(breakdown_lines)
-        week_label = f"Mon {week_start_local.strftime('%-d %b')} — now ({total_week}h logged)"
-    else:
-        breakdown_text = "_No entries logged this week yet._"
-        week_label     = f"Mon {week_start_local.strftime('%-d %b')} — now"
+    # Yearly breakdown — 1 Jan 00:00 local time to now
+    year_start_local = now_local.replace(
+        month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    year_start_utc = year_start_local.astimezone(timezone.utc)
+    year_data      = queue_category_breakdown(year_start_utc)
+    total_year     = sum(year_data.values())
+
+    def format_breakdown(data: dict, total: int) -> str:
+        if not data:
+            return "_No entries yet._"
+        bar_width = 10
+        lines = []
+        for cat, count in data.items():
+            pct    = round(count / total * 100)
+            filled = round(pct / 100 * bar_width)
+            bar    = "█" * filled + "░" * (bar_width - filled)
+            lines.append(f"{cat}\n  `{bar}` {pct}% ({count}h)")
+        return "\n".join(lines)
+
+    week_label = (
+        f"Mon {week_start_local.strftime('%-d %b')} — now ({total_week}h)"
+        if total_week else f"Mon {week_start_local.strftime('%-d %b')} — now"
+    )
+    year_label = (
+        f"1 Jan {now_local.year} — now ({total_year}h)"
+        if total_year else f"1 Jan {now_local.year} — now"
+    )
 
     await update.message.reply_text(
         f"📊 *Queue Status*\n"
@@ -866,7 +882,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Skipped:   `{skipped}`\n"
         f"• Unsynced:  `{unsynced}`\n\n"
         f"📅 *This Week* — _{week_label}_\n"
-        f"{breakdown_text}",
+        f"{format_breakdown(week_data, total_week)}\n\n"
+        f"📆 *This Year* — _{year_label}_\n"
+        f"{format_breakdown(year_data, total_year)}",
         parse_mode="Markdown",
     )
 
