@@ -903,12 +903,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     week_start_utc        = week_start_local.astimezone(timezone.utc)
     week_data, total_week = queue_category_breakdown(week_start_utc)
 
-    # Per-day counts for the current week (for quick sanity check)
-    daily_counts = queue_daily_counts_week(week_start_utc, now_utc)
-    daily_line   = "  " + "  ".join(
-        f"`{label}:{count}h`" for label, count in daily_counts
-    )
-
     # Yearly breakdown — 1 Jan 00:00 local time to now
     year_start_local = now_local.replace(
         month=1, day=1, hour=0, minute=0, second=0, microsecond=0
@@ -970,7 +964,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Skipped:   `{skipped}`\n"
         f"• Unsynced:  `{unsynced}`\n\n"
         f"📅 *This Week* — _{week_label}_\n"
-        f"{daily_line}\n"
         f"{format_breakdown(week_data, total_week)}\n\n"
         f"📆 *This Year* — _{year_label}_\n"
         f"{format_breakdown(year_data, total_year)}",
