@@ -50,6 +50,16 @@ CATEGORIES = {
     "⚪️ Other":        {"color": {"red": 1.0, "green": 1.0, "blue": 1.0}},
 }
 
+# Single-letter (and word) shortcuts used by the /log quick-entry command
+CATEGORY_SHORTCUTS: dict[str, str] = {
+    "c": "🟢 Creative",    "cr": "🟢 Creative",    "creative": "🟢 Creative",
+    "h": "💎 Health",      "he": "💎 Health",      "health":   "💎 Health",
+    "p": "🔘 Professional","pr": "🔘 Professional","prof":     "🔘 Professional",
+                                                    "professional": "🔘 Professional",
+    "s": "🟡 Social",      "so": "🟡 Social",      "social":   "🟡 Social",
+    "o": "⚪️ Other",       "ot": "⚪️ Other",       "other":    "⚪️ Other",
+}
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
@@ -496,43 +506,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Please select a valid category from the menu.")
             return
         current_prompt["category"] = text
-        current_prompt["stage"]    = "tag"
+        current_prompt["stage"]    = "tag_note"
         await update.message.reply_text(
-            f"📂 Category: *{escape_md(text)}*\n\n"
-            f"*Step 2/3:* What's your activity tag?\n"
-            f"_(e.g. Tasks, Journaling, Meeting — max {TAG_MAX_LEN} chars)_",
+            f"📂 *{escape_md(text)}*\n\n"
+            f"*Step 2/2:* Tag? _(add `| note` for context — optional)_\n"
+            f"`Deep Work` or `Deep Work | focused on Q1`",
             parse_mode="Markdown",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
 
-    # ── Stage 2: Waiting for tag ───────────────────────────────────────────
-    if current_prompt.get("stage") == "tag":
-        if len(text) > TAG_MAX_LEN:
+    # ── Stage 2: Waiting for tag (+ optional inline note) ─────────────────
+    # Format: "Tag" or "Tag | Note"  — one message saves the whole entry.
+    if current_prompt.get("stage") == "tag_note":
+        if " | " in text:
+            tag, note = text.split(" | ", 1)
+            tag  = tag.strip()
+            note = note.strip()
+        else:
+            tag  = text.strip()
+            note = ""
+
+        if len(tag) > TAG_MAX_LEN:
             await update.message.reply_text(
                 f"⚠️ Tag is too long (max {TAG_MAX_LEN} chars). Please shorten it."
             )
             return
-        current_prompt["tag"]   = text
-        current_prompt["stage"] = "note"
-        await update.message.reply_text(
-            f"✏️ Tag: *{escape_md(text)}*\n\n"
-            f"*Step 3/3:* Add a note for this hour?\n"
-            f"_(Type anything or /skip to leave blank — max {NOTE_MAX_LEN} chars)_",
-            parse_mode="Markdown",
-        )
-        return
-
-    # ── Stage 3: Waiting for note ──────────────────────────────────────────
-    if current_prompt.get("stage") == "note":
-        if len(text) > NOTE_MAX_LEN:
+        if len(note) > NOTE_MAX_LEN:
             await update.message.reply_text(
                 f"⚠️ Note is too long (max {NOTE_MAX_LEN} chars). Please shorten it."
             )
             return
+
         category = current_prompt["category"]
-        tag      = current_prompt["tag"]
-        note     = text
         now      = datetime.now(timezone.utc)
         queue_id = current_prompt["queue_id"]
         sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"]).astimezone(timezone.utc)
@@ -546,11 +552,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await sheets_update_grid(sched_ts, category, tag)
             queue_mark_sheets_synced(queue_id, True)
             status_text = "Updated" if is_edit else "Logged"
+            note_line   = f"\n• Note: {escape_md(note)}" if note else ""
             await update.message.reply_text(
                 f"✅ *{status_text}!*\n"
                 f"• Category: {escape_md(category)}\n"
-                f"• Tag: {escape_md(tag)}\n"
-                f"• Note: {escape_md(note)}",
+                f"• Tag: {escape_md(tag)}{note_line}",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -560,7 +566,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         current_prompt = {}
-        await asyncio.sleep(0.5)
 
         next_pending = queue_get_oldest_pending()
         if next_pending:
@@ -574,17 +579,135 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick one-line entry: /log <category> <tag> [| note]
+    Bypasses the multi-step flow entirely — fastest way to log an hour.
+
+    Category shortcuts (case-insensitive):
+      c / cr / creative       → 🟢 Creative
+      h / he / health         → 💎 Health
+      p / pr / prof / ...     → 🔘 Professional
+      s / so / social         → 🟡 Social
+      o / ot / other          → ⚪️ Other
+
+    Examples:
+      /log c Deep Work
+      /log h Sleep | 7 hrs, feel good
+      /log p Tasks | quarterly review
+    """
+    global current_prompt
+    if not _is_owner(update):
+        return
+
+    args_text = " ".join(context.args).strip() if context.args else ""
+    if not args_text:
+        shortcuts = "`c` `h` `p` `s` `o`"
+        await update.message.reply_text(
+            f"⚡ *Quick Log* — log an hour in one message\n\n"
+            f"*Usage:* `/log <category> <tag> [| note]`\n\n"
+            f"*Category shortcuts:* {shortcuts}\n"
+            f"_(Creative, Health, Professional, Social, Other)_\n\n"
+            f"*Examples:*\n"
+            f"• `/log c Deep Work`\n"
+            f"• `/log h Sleep | 7 hrs, feel rested`\n"
+            f"• `/log p Tasks | quarterly review`",
+            parse_mode="Markdown",
+        )
+        return
+
+    if current_prompt:
+        await update.message.reply_text(
+            "⚠️ You're mid-entry. Use /cancel first, then /log."
+        )
+        return
+
+    # Parse: first token = category shortcut, rest = tag [| note]
+    parts    = args_text.split(None, 1)
+    shortcut = parts[0].lower()
+    rest     = parts[1].strip() if len(parts) > 1 else ""
+
+    category = CATEGORY_SHORTCUTS.get(shortcut)
+    if not category:
+        valid = " | ".join(f"`{k}`" for k in ["c", "h", "p", "s", "o"])
+        await update.message.reply_text(
+            f"❓ Unknown category `{escape_md(shortcut)}`.\n"
+            f"Valid shortcuts: {valid}",
+            parse_mode="Markdown",
+        )
+        return
+
+    if not rest:
+        await update.message.reply_text("Please add a tag after the category, e.g. `/log c Deep Work`", parse_mode="Markdown")
+        return
+
+    # Split "Tag | Note" or just "Tag"
+    if " | " in rest:
+        tag, note = rest.split(" | ", 1)
+        tag  = tag.strip()
+        note = note.strip()
+    else:
+        tag  = rest
+        note = ""
+
+    if len(tag) > TAG_MAX_LEN:
+        await update.message.reply_text(f"⚠️ Tag too long (max {TAG_MAX_LEN} chars).")
+        return
+    if len(note) > NOTE_MAX_LEN:
+        await update.message.reply_text(f"⚠️ Note too long (max {NOTE_MAX_LEN} chars).")
+        return
+
+    pending = queue_get_oldest_pending()
+    if not pending:
+        await update.message.reply_text("✅ No pending entries right now.")
+        return
+
+    now      = datetime.now(timezone.utc)
+    queue_id = pending["id"]
+    sched_ts = datetime.fromisoformat(pending["scheduled_ts"]).astimezone(timezone.utc)
+
+    queue_mark_done(queue_id, category, tag, note, now, sheets_synced=False)
+    try:
+        await sheets_save_row(sched_ts, now, category, tag, note)
+        await sheets_update_grid(sched_ts, category, tag)
+        queue_mark_sheets_synced(queue_id, True)
+        note_line = f"\n• Note: {escape_md(note)}" if note else ""
+        await update.message.reply_text(
+            f"⚡ *Logged!*\n"
+            f"• Category: {escape_md(category)}\n"
+            f"• Tag: {escape_md(tag)}{note_line}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        log.error("Sheets write failed in /log: %s", e)
+        await update.message.reply_text(
+            "⚠️ Saved locally but Sheets write failed. Use /sync to retry."
+        )
+
+    next_pending = queue_get_oldest_pending()
+    if next_pending:
+        await update.message.reply_text(
+            f"➡️ {queue_count_pending()} more to go — here's the next one:"
+        )
+        await send_prompt(context.bot, next_pending)
+    else:
+        await update.message.reply_text("🎉 All caught up! I'll ping you again next hour.")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_owner(update):
         return
     await update.message.reply_text(
         "👋 *Hourly Logger is active!*\n\n"
         "I'll message you every hour for your log entry.\n\n"
-        "Commands:\n"
-        "• /status — see queue stats\n"
+        "*Entry modes:*\n"
+        "• *Guided* — tap category, then type `Tag | Note` _(2 steps)_\n"
+        "• *Quick* — `/log c Deep Work | note` _(1 message, no prompts)_\n\n"
+        "*Commands:*\n"
+        "• /log `<cat> <tag> [| note]` — instant one-line entry\n"
+        "• /status — queue stats\n"
         "• /edit — edit recent entries\n"
-        "• /skip — skip current prompt (or just the note)\n"
-        "• /cancel — abandon current flow without skipping\n"
+        "• /skip — skip current prompt\n"
+        "• /cancel — abandon flow without skipping\n"
         "• /sync — retry failed Sheets writes",
         parse_mode="Markdown",
     )
@@ -628,34 +751,10 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nothing to skip right now.")
         return
 
-    # On note stage: save tag with no note, rather than skipping the whole entry
-    if current_prompt.get("stage") == "note":
-        category = current_prompt["category"]
-        tag      = current_prompt["tag"]
-        now      = datetime.now(timezone.utc)
-        queue_id = current_prompt["queue_id"]
-        sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"]).astimezone(timezone.utc)
-        is_edit  = current_prompt.get("is_edit", False)
-
-        queue_mark_done(queue_id, category, tag, "", now, sheets_synced=False)
-        try:
-            await sheets_save_row(sched_ts, now, category, tag, note="", is_edit=is_edit)
-            await sheets_update_grid(sched_ts, category, tag)
-            queue_mark_sheets_synced(queue_id, True)
-            status_text = "Updated" if is_edit else "Logged"
-            await update.message.reply_text(
-                f"✅ *{status_text} without note!*\n"
-                f"• Category: {escape_md(category)}\n"
-                f"• Tag: {escape_md(tag)}",
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            log.error("Sheets write failed: %s", e)
-            await update.message.reply_text("⚠️ Saved locally, Sheets write failed.")
-    else:
-        # Skip entire entry (called from category or tag stage)
-        queue_mark_skipped(current_prompt["queue_id"])
-        await update.message.reply_text("⏭ Skipped.", reply_markup=ReplyKeyboardRemove())
+    # Skip the entire entry from any stage — tag+note are now entered together
+    # so there is no partial-save opportunity mid-flow.
+    queue_mark_skipped(current_prompt["queue_id"])
+    await update.message.reply_text("⏭ Skipped.", reply_markup=ReplyKeyboardRemove())
 
     current_prompt = {}
     next_pending = queue_get_oldest_pending()
@@ -798,6 +897,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("log",    cmd_log))
     app.add_handler(CommandHandler("skip",   cmd_skip))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("status", cmd_status))
