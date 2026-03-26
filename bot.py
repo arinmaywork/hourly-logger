@@ -206,6 +206,20 @@ def queue_get_unsynced():
         ).fetchall()
 
 
+def queue_category_breakdown(since_ts: datetime) -> dict[str, int]:
+    """Return {category: hour_count} for done entries on or after since_ts, sorted by count desc."""
+    with db_connect() as conn:
+        rows = conn.execute(
+            """SELECT category, COUNT(*) as cnt
+               FROM queue
+               WHERE status='done' AND scheduled_ts >= ?
+               GROUP BY category
+               ORDER BY cnt DESC""",
+            (since_ts.isoformat(),),
+        ).fetchall()
+    return {row["category"]: row["cnt"] for row in rows if row["category"]}
+
+
 def backfill_missed_prompts():
     with db_connect() as conn:
         last = conn.execute("SELECT MAX(scheduled_ts) FROM queue").fetchone()[0]
@@ -821,12 +835,38 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         unsynced = conn.execute(
             "SELECT COUNT(*) FROM queue WHERE status='done' AND sheets_synced=0"
         ).fetchone()[0]
+
+    # Weekly category breakdown — Monday 00:00 in user's timezone to now
+    now_local        = datetime.now(TZ)
+    week_start_local = (now_local - dt.timedelta(days=now_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    week_start_utc   = week_start_local.astimezone(timezone.utc)
+    breakdown        = queue_category_breakdown(week_start_utc)
+    total_week       = sum(breakdown.values())
+
+    if breakdown:
+        bar_width = 10  # chars per bar
+        breakdown_lines = []
+        for cat, count in breakdown.items():
+            pct      = round(count / total_week * 100)
+            filled   = round(pct / 100 * bar_width)
+            bar      = "█" * filled + "░" * (bar_width - filled)
+            breakdown_lines.append(f"{cat}\n  `{bar}` {pct}% ({count}h)")
+        breakdown_text = "\n".join(breakdown_lines)
+        week_label = f"Mon {week_start_local.strftime('%-d %b')} — now ({total_week}h logged)"
+    else:
+        breakdown_text = "_No entries logged this week yet._"
+        week_label     = f"Mon {week_start_local.strftime('%-d %b')} — now"
+
     await update.message.reply_text(
         f"📊 *Queue Status*\n"
         f"• Pending:   `{pending}`\n"
         f"• Completed: `{done}`\n"
         f"• Skipped:   `{skipped}`\n"
-        f"• Unsynced:  `{unsynced}`",
+        f"• Unsynced:  `{unsynced}`\n\n"
+        f"📅 *This Week* — _{week_label}_\n"
+        f"{breakdown_text}",
         parse_mode="Markdown",
     )
 
