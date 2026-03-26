@@ -441,7 +441,9 @@ async def send_prompt(bot, queue_row, is_edit: bool = False):
     msg = (
         f"{header}"
         f"📝 *Hourly Log* — `{scheduled.strftime('%a %b %d, %H:%M')}`\n\n"
-        f"*Step 1/3:* Select a category:"
+        f"*Step 1/2:* Select a category:\n"
+        f"_or skip the keyboard with_ `/log c Deep Work | note`\n"
+        f"`c` Creative · `h` Health · `p` Professional · `s` Social · `o` Other"
     )
     keyboard     = [[cat] for cat in CATEGORIES.keys()]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
