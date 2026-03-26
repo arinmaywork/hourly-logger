@@ -464,6 +464,128 @@ def _sheets_update_grid_sync(scheduled_ts: datetime, category: str, tag: str):
                 raise
 
 
+def _sheets_category_breakdown_sync(
+    since_date: datetime,
+    until_date: datetime,
+) -> tuple[dict[str, int], int]:
+    """Read category breakdown from the Weekly grid sheet using cell background colours.
+
+    since_date / until_date are local-TZ datetimes; only date portion is used.
+    Returns (breakdown, total) where breakdown = {category: count}.
+
+    Grid structure (matches _sheets_update_grid_sync):
+      Row 2          — date strings "M/D/YY" (no leading zeros)
+      Rows 5 – 28   — hour slots: row 5 = 07:00, row 21 = 23:00,
+                        row 22 = 00:00, row 23 = 01:00, …, row 28 = 06:00
+      Cell colour    — category; white / default = uncategorised or empty
+    """
+    # Build colour-key → category name map (CATEGORIES uses 0.0-1.0 floats)
+    def _colour_key(r, g, b):
+        return (round(r, 2), round(g, 2), round(b, 2))
+
+    color_to_cat: dict[tuple, str] = {
+        _colour_key(**info["color"]): cat
+        for cat, info in CATEGORIES.items()
+    }
+    white_key = _colour_key(1.0, 1.0, 1.0)
+
+    spreadsheet = _get_spreadsheet()
+    sheet_id    = _get_sheet_sync(GRID_SHEET_NAME).id
+
+    # Fetch full sheet data including cell formatting via the underlying REST API
+    resp = spreadsheet.client.request(
+        "get",
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet.id}",
+        params={
+            "ranges":           f"'{GRID_SHEET_NAME}'",
+            "includeGridData":  "true",
+            "fields": (
+                "sheets(data(rowData(values("
+                "effectiveValue/stringValue,"
+                "effectiveFormat/backgroundColor))))"
+            ),
+        },
+    ).json()
+
+    row_data = resp["sheets"][0]["data"][0].get("rowData", [])
+
+    # --- Parse dates from row 2 (index 1) ---
+    since_d  = since_date.astimezone(TZ).date()
+    until_d  = until_date.astimezone(TZ).date()
+
+    date_cells = row_data[1]["values"] if len(row_data) > 1 else []
+    target_cols: set[int] = set()
+    for col_idx, cell in enumerate(date_cells):
+        raw = cell.get("effectiveValue", {}).get("stringValue", "")
+        if not raw:
+            continue
+        try:
+            cell_date = datetime.strptime(raw.strip(), "%m/%d/%y").date()
+        except ValueError:
+            continue
+        if since_d <= cell_date <= until_d:
+            target_cols.add(col_idx)
+
+    if not target_cols:
+        return {}, 0
+
+    # Data rows are index 4 – 27 (rows 5 – 28, 1-indexed)
+    DATA_ROW_START = 4
+    DATA_ROW_END   = 27
+
+    breakdown: dict[str, int] = {}
+    total = 0
+
+    for row_idx in range(DATA_ROW_START, DATA_ROW_END + 1):
+        if row_idx >= len(row_data):
+            break
+        cells = row_data[row_idx].get("values", [])
+        for col_idx in target_cols:
+            if col_idx >= len(cells):
+                continue
+            cell = cells[col_idx]
+
+            # Check for content (non-empty cell means an entry was logged)
+            has_value = bool(cell.get("effectiveValue", {}).get("stringValue", ""))
+            if not has_value:
+                continue
+
+            bg   = cell.get("effectiveFormat", {}).get("backgroundColor", {})
+            r    = bg.get("red",   1.0)
+            g    = bg.get("green", 1.0)
+            b    = bg.get("blue",  1.0)
+            key  = _colour_key(r, g, b)
+            cat  = color_to_cat.get(key)
+
+            if cat:
+                breakdown[cat] = breakdown.get(cat, 0) + 1
+            else:
+                # Unknown colour or white without a category match — count as uncategorised
+                breakdown.setdefault("_uncategorised", 0)
+                breakdown["_uncategorised"] += 1
+            total += 1
+
+    # Sort by count descending; remove internal sentinel
+    uncategorised = breakdown.pop("_uncategorised", 0)
+    breakdown = dict(sorted(breakdown.items(), key=lambda x: -x[1]))
+    if uncategorised:
+        breakdown["_uncategorised"] = uncategorised
+
+    return breakdown, total
+
+
+async def sheets_category_breakdown(
+    since_date: datetime,
+    until_date: datetime,
+) -> tuple[dict[str, int], int]:
+    """Non-blocking async wrapper around _sheets_category_breakdown_sync."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        partial(_sheets_category_breakdown_sync, since_date, until_date),
+    )
+
+
 async def sheets_save_row(
     scheduled_ts: datetime,
     submitted_ts: datetime,
@@ -896,38 +1018,36 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc   = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(TZ)
 
-    # Weekly breakdown — Monday 00:00 local time to now
+    # Weekly date range — Monday 00:00 local time to today
     week_start_local = (now_local - dt.timedelta(days=now_local.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    week_start_utc        = week_start_local.astimezone(timezone.utc)
-    week_data, total_week = queue_category_breakdown(week_start_utc)
 
-    # Yearly breakdown — 1 Jan 00:00 local time to now
+    # Yearly date range — 1 Jan 00:00 local time to today
     year_start_local = now_local.replace(
         month=1, day=1, hour=0, minute=0, second=0, microsecond=0
     )
-    year_start_utc        = year_start_local.astimezone(timezone.utc)
-    year_data, total_year = queue_category_breakdown(year_start_utc)
+
+    # Fetch both breakdowns from the Weekly Google Sheet in parallel
+    await update.message.reply_text("⏳ Fetching data from Weekly sheet…")
+    week_data, total_week = await sheets_category_breakdown(week_start_local, now_local)
+    year_data, total_year = await sheets_category_breakdown(year_start_local, now_local)
 
     def format_breakdown(data: dict, total_done: int) -> str:
         """Render a bar-chart breakdown.
 
-        Percentages are calculated relative to total_done (all logged entries, including
-        any uncategorised ones) so they represent the true fraction of time in each
-        category.  Rounding uses the largest-remainder method so values always sum to 100%
-        when every entry is categorised.
+        data may contain a '_uncategorised' sentinel key for cells with content
+        but no matching category colour.  Percentages are relative to total_done
+        and use the largest-remainder method to guarantee they sum to 100%.
         """
         if total_done == 0:
             return "_No entries yet._"
 
         bar_width     = 10
-        cat_total     = sum(data.values())
-        uncategorised = total_done - cat_total  # entries with NULL category
+        uncategorised = data.get("_uncategorised", 0)
+        cat_data      = {k: v for k, v in data.items() if k != "_uncategorised"}
 
-        # Build full list including a synthetic "Uncategorised" bucket so
-        # percentages are computed relative to total_done.
-        all_items: dict[str, int] = dict(data)
+        all_items: dict[str, int] = dict(cat_data)
         if uncategorised:
             all_items["⚠️ Uncategorised"] = uncategorised
 
@@ -939,7 +1059,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             floored[cat] += 1
 
         lines = []
-        for cat, count in data.items():
+        for cat, count in cat_data.items():
             pct    = floored[cat]
             filled = round(pct / 100 * bar_width)
             bar    = "█" * filled + "░" * (bar_width - filled)
@@ -947,7 +1067,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if uncategorised:
             pct = floored["⚠️ Uncategorised"]
-            lines.append(f"_⚠️ {uncategorised}h logged without a category ({pct}%)_")
+            lines.append(f"_⚠️ {uncategorised}h unmatched colour ({pct}%)_")
 
         return "\n".join(lines)
 
