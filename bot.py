@@ -1452,7 +1452,13 @@ async def hourly_job(bot):
     scheduled = now.replace(minute=0, second=0, microsecond=0)
     queue_add_prompt(scheduled)  # INSERT OR IGNORE prevents duplicate on startup race
     log.info("Hourly job fired. Scheduled TS: %s", scheduled.isoformat())
-    if not current_prompt:
+
+    # Send a prompt (or re-send as a reminder) unless the user is actively
+    # mid-flow — i.e. they have already selected a category and are currently
+    # typing the tag or note.  Stages beyond "category" mean real work is in
+    # progress and we must not overwrite current_prompt.
+    mid_flow = bool(current_prompt and current_prompt.get("stage") not in ("category",))
+    if not mid_flow:
         pending = queue_get_oldest_pending()
         if pending:
             await send_prompt(bot, pending)
