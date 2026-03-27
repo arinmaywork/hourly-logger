@@ -1130,13 +1130,16 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if row and row[0].strip()
         }
 
-        # ── 4. Walk data rows ─────────────────────────────────────────────────
-        # Data rows start just after the date row and run for 24 rows (one per hour).
-        # Offset by date_row_idx so the logic works whether dates are in row 1 or 2.
-        data_start = date_row_idx + 1   # row immediately after the date row (0-based)
-        # row_to_hour maps 1-based row numbers assuming dates are in row 2 (bot default).
-        # Adjust by subtracting the row offset introduced by the date row position.
-        row_offset = date_row_idx - 1   # 0 when dates are in row 2, -1 when in row 1
+        # ── 4. Find data start row — look for "7:00" in column A ─────────────
+        # The sheet has fixed header rows (Week No, Date, Day, Spent) before
+        # the 24 hour-slot rows start at row 5 (0-based index 4).
+        # Scan column A for the "7:00" label to locate the exact start row.
+        data_start = 4   # safe default (row 5)
+        for _i, rd in enumerate(row_data):
+            col_a = _cell_text(rd.get("values", [{}])[0]) if rd.get("values") else ""
+            if col_a.strip() in ("7:00", "07:00"):
+                data_start = _i
+                break
 
         new_rows: list[list] = []
         unmatched = 0
@@ -1144,7 +1147,7 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for row_idx in range(data_start, data_start + 24):
             if row_idx >= len(row_data):
                 break
-            hour  = row_to_hour(row_idx + 1 - row_offset)
+            hour  = row_to_hour(row_idx + 1)
             cells = row_data[row_idx].get("values", [])
 
             for col_idx, col_date in col_dates.items():
@@ -1170,11 +1173,16 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if actual_date > dt.date.today():
                     continue
 
-                bg  = cell.get("effectiveFormat", {}).get("backgroundColor", {})
+                # Prefer backgroundColorStyle.rgbColor (current API field);
+                # fall back to backgroundColor (deprecated but still populated).
+                eff_fmt   = cell.get("effectiveFormat", {})
+                rgb       = eff_fmt.get("backgroundColorStyle", {}).get("rgbColor", {})
+                if not rgb:
+                    rgb   = eff_fmt.get("backgroundColor", {})
                 cat = _nearest_cat(
-                    bg.get("red",   1.0),
-                    bg.get("green", 1.0),
-                    bg.get("blue",  1.0),
+                    rgb.get("red",   1.0),
+                    rgb.get("green", 1.0),
+                    rgb.get("blue",  1.0),
                 )
                 if not cat:
                     unmatched += 1
