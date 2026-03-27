@@ -1269,6 +1269,181 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(parts))
 
 
+async def cmd_fixcats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Patch blank-category rows in the Log tab by re-reading colours from Weekly grid.
+
+    For each Log row where column C is empty, this command looks up the
+    corresponding cell in the Weekly grid (matched by date + hour), reads its
+    background colour, and writes the nearest-matched category back to column C.
+    """
+    if not _is_owner(update):
+        return
+
+    await update.message.reply_text("⏳ Scanning Log tab for blank categories…")
+
+    def _fixcats_sync() -> str:
+        # ── Colour helpers (identical to cmd_migrate) ────────────────────────
+        def _nearest_cat(r: float, g: float, b: float) -> str:
+            best, best_d = "", float("inf")
+            for cat_name, info in CATEGORIES.items():
+                c = info["color"]
+                d = ((r - c["red"])**2 + (g - c["green"])**2 + (b - c["blue"])**2) ** 0.5
+                if d < best_d:
+                    best_d, best = d, cat_name
+            return best if best_d <= 0.25 else ""
+
+        def _cell_text(cell: dict) -> str:
+            return (
+                cell.get("formattedValue", "")
+                or cell.get("effectiveValue", {}).get("stringValue", "")
+                or cell.get("userEnteredValue", {}).get("stringValue", "")
+            ).strip()
+
+        # ── 1. Fetch Weekly grid with full formatting ────────────────────────
+        spreadsheet = _get_spreadsheet()
+        resp = spreadsheet.client.request(
+            "get",
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet.id}",
+            params={"ranges": f"'{GRID_SHEET_NAME}'", "includeGridData": "true"},
+        ).json()
+
+        if "error" in resp:
+            return f"❌ Sheets API error: {resp['error'].get('message', resp['error'])}"
+
+        row_data = resp["sheets"][0]["data"][0].get("rowData", [])
+
+        # ── 2. Parse date row → col_idx → date, build reverse map ───────────
+        def _parse_date_row(row_idx: int) -> dict[int, dt.date]:
+            result: dict[int, dt.date] = {}
+            for col_idx, cell in enumerate(row_data[row_idx].get("values", [])):
+                raw = _cell_text(cell)
+                if not raw:
+                    continue
+                for fmt in ("%m/%d/%y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%y"):
+                    try:
+                        result[col_idx] = datetime.strptime(raw, fmt).date()
+                        break
+                    except ValueError:
+                        pass
+            return result
+
+        col_dates: dict[int, dt.date] = {}
+        for _i in range(min(4, len(row_data))):
+            col_dates = _parse_date_row(_i)
+            if len(col_dates) >= 3:
+                break
+
+        if not col_dates:
+            return "❌ Could not find date row in Weekly grid."
+
+        date_to_col: dict[dt.date, int] = {v: k for k, v in col_dates.items()}
+
+        # ── 3. Find data_start row (where "7:00" label sits in column A) ─────
+        data_start = 4   # safe default (row 5, 0-based index 4)
+        for _i, rd in enumerate(row_data):
+            col_a = _cell_text(rd.get("values", [{}])[0]) if rd.get("values") else ""
+            if col_a.strip() in ("7:00", "07:00"):
+                data_start = _i
+                break
+
+        # ── 4. Read Log tab — collect blank-category rows ────────────────────
+        log_ws   = _get_sheet_sync(SHEET_NAME)
+        all_rows = log_ws.get_all_values()   # includes header at index 0
+
+        # (sheet_row_1based, sched_str) for rows with no category
+        blank_rows: list[tuple[int, str]] = []
+        for i, row in enumerate(all_rows[1:], start=2):
+            sched = row[0].strip() if len(row) > 0 else ""
+            cat   = row[2].strip() if len(row) > 2 else ""
+            if sched and not cat:
+                blank_rows.append((i, sched))
+
+        if not blank_rows:
+            return "✅ No blank-category rows found — nothing to fix."
+
+        # ── 5. For each blank row, look up colour in the Weekly grid ─────────
+        # Hour → 0-based row_data index:
+        #   Hours 7-23 are at rows 5-21 (1-based), i.e. data_start + (hour - 7).
+        #   Hours 0-6  are at rows 22-28 (1-based), i.e. data_start + 17 + hour.
+        def hour_to_row_idx(hour: int) -> int:
+            if hour >= 7:
+                return data_start + (hour - 7)
+            else:
+                return data_start + 17 + hour
+
+        cell_updates: list[gspread.Cell] = []
+        fixed       = 0
+        no_date     = 0   # date not in the Weekly grid (old data beyond grid range)
+        no_colour   = 0   # colour couldn't be matched
+
+        for sheet_row, sched_str in blank_rows:
+            try:
+                sched_dt = datetime.strptime(sched_str, "%Y-%m-%d %H:%M")
+            except ValueError:
+                no_colour += 1
+                continue
+
+            actual_date = sched_dt.date()
+            hour        = sched_dt.hour
+
+            # In the Weekly grid, hours 0-6 sit in the *previous* day's column
+            col_date = actual_date - dt.timedelta(days=1) if hour < 7 else actual_date
+
+            col_idx = date_to_col.get(col_date)
+            if col_idx is None:
+                no_date += 1
+                continue
+
+            row_idx = hour_to_row_idx(hour)
+            if row_idx >= len(row_data):
+                no_date += 1
+                continue
+
+            cells = row_data[row_idx].get("values", [])
+            if col_idx >= len(cells):
+                no_colour += 1
+                continue
+
+            cell    = cells[col_idx]
+            eff_fmt = cell.get("effectiveFormat", {})
+            rgb     = eff_fmt.get("backgroundColorStyle", {}).get("rgbColor", {})
+            if not rgb:
+                rgb = eff_fmt.get("backgroundColor", {})
+
+            cat = _nearest_cat(
+                rgb.get("red",   0.0),
+                rgb.get("green", 0.0),
+                rgb.get("blue",  0.0),
+            )
+
+            if not cat:
+                no_colour += 1
+                continue
+
+            cell_updates.append(gspread.Cell(row=sheet_row, col=3, value=cat))
+            fixed += 1
+
+        # ── 6. Batch-write all fixed categories to Log tab ───────────────────
+        if cell_updates:
+            log_ws.update_cells(cell_updates, value_input_option="RAW")
+
+        msg = f"✅ Fixed *{fixed}* blank-category entr{'y' if fixed == 1 else 'ies'}."
+        if no_date:
+            msg += f"\n• {no_date} entries skipped — date not found in Weekly grid (pre-grid history)."
+        if no_colour:
+            msg += f"\n• {no_colour} entries skipped — colour unrecognised or cell empty."
+        return msg
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _fixcats_sync)
+    except Exception as exc:
+        log.exception("fixcats failed")
+        result = f"❌ Error: {exc}"
+
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
 # ─── Scheduler ────────────────────────────────────────────────────────────────
 
 async def hourly_job(bot):
@@ -1299,6 +1474,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("edit",   cmd_edit))
     app.add_handler(CommandHandler("sync",    cmd_sync))
+    app.add_handler(CommandHandler("fixcats", cmd_fixcats))
     # /migrate intentionally not registered — one-time migration completed Mar 2026.
     # The cmd_migrate function is retained for reference only.
     # app.add_handler(CommandHandler("migrate", cmd_migrate))

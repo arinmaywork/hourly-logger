@@ -31,6 +31,7 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | `/skip` | During the **note** step: saves the entry without a note. During **category** or **tag** step: marks the slot as skipped. |
 | `/cancel` | Abandons the current in-progress entry without marking it skipped. The prompt remains pending. Also exits edit-selection mode. |
 | `/sync` | Retries all entries whose Sheets write previously failed. Reports success/failure counts. |
+| `/fixcats` | Patches blank-category rows in the Log tab by re-reading their background colour from the Weekly grid. Run once after the initial migration to fix the 322 entries that were copied without a category. |
 
 ### Category Shortcuts (for `/log`)
 
