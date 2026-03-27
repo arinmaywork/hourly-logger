@@ -55,7 +55,7 @@ def _colour_key(r, g, b):
     return (round(float(r), 2), round(float(g), 2), round(float(b), 2))
 
 COLOR_TO_CAT = {
-    _colour_key(**v): k for k, v in CATEGORIES.items()
+    _colour_key(v["red"], v["green"], v["blue"]): k for k, v in CATEGORIES.items()
 }
 
 # Row (1-based) → local hour

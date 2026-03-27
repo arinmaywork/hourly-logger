@@ -1035,6 +1035,142 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """One-time migration: copy entries from Weekly grid → Log tab.
+
+    Safe to run multiple times — skips entries already in the Log tab.
+    """
+    if not _is_owner(update):
+        return
+
+    await update.message.reply_text(
+        "⏳ Starting migration from Weekly grid → Log tab.\n"
+        "This may take a minute…"
+    )
+
+    def _migrate_sync() -> str:
+        """Synchronous migration — runs in thread pool."""
+        # ── Colour → category map ────────────────────────────────────────────
+        def _ck(r, g, b):
+            return (round(float(r), 2), round(float(g), 2), round(float(b), 2))
+
+        color_to_cat = {
+            _ck(info["color"]["red"], info["color"]["green"], info["color"]["blue"]): cat
+            for cat, info in CATEGORIES.items()
+        }
+
+        def row_to_hour(row_1based: int) -> int:
+            return row_1based - 22 if row_1based >= 22 else row_1based + 2
+
+        spreadsheet = _get_spreadsheet()
+
+        # ── 1. Fetch Weekly grid with full formatting ─────────────────────────
+        resp = spreadsheet.client.request(
+            "get",
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet.id}",
+            params={
+                "ranges":          f"'{GRID_SHEET_NAME}'",
+                "includeGridData": "true",
+            },
+        ).json()
+
+        if "error" in resp:
+            return f"❌ Sheets API error: {resp['error'].get('message', resp['error'])}"
+
+        row_data = resp["sheets"][0]["data"][0].get("rowData", [])
+        if len(row_data) < 2:
+            return "❌ Weekly grid has fewer than 2 rows — nothing to migrate."
+
+        # ── 2. Parse date columns from row 2 ─────────────────────────────────
+        col_dates: dict[int, dt.date] = {}
+        for col_idx, cell in enumerate(row_data[1].get("values", [])):
+            raw = (
+                cell.get("effectiveValue", {}).get("stringValue", "")
+                or cell.get("userEnteredValue", {}).get("stringValue", "")
+            ).strip()
+            if not raw:
+                continue
+            for fmt in ("%m/%d/%y", "%Y-%m-%d"):
+                try:
+                    col_dates[col_idx] = datetime.strptime(raw, fmt).date()
+                    break
+                except ValueError:
+                    pass
+
+        if not col_dates:
+            return "❌ No date columns found in row 2 of Weekly grid."
+
+        # ── 3. Load existing Log entries ──────────────────────────────────────
+        log_ws   = _get_sheet_sync(SHEET_NAME)
+        existing = {
+            row[0].strip()
+            for row in log_ws.get_all_values()[1:]
+            if row and row[0].strip()
+        }
+
+        # ── 4. Walk data rows (1-based 5–28) ──────────────────────────────────
+        new_rows: list[list] = []
+        unmatched = 0
+
+        for row_idx in range(4, 28):   # 0-based indices 4–27
+            if row_idx >= len(row_data):
+                break
+            hour  = row_to_hour(row_idx + 1)
+            cells = row_data[row_idx].get("values", [])
+
+            for col_idx, col_date in col_dates.items():
+                if col_idx >= len(cells):
+                    continue
+                cell = cells[col_idx]
+
+                tag = (
+                    cell.get("effectiveValue", {}).get("stringValue", "")
+                    or cell.get("userEnteredValue", {}).get("stringValue", "")
+                ).strip()
+                if not tag:
+                    continue
+
+                actual_date = col_date + dt.timedelta(days=1) if hour < 7 else col_date
+                sched_local = datetime(
+                    actual_date.year, actual_date.month, actual_date.day,
+                    hour, 0, 0, tzinfo=TZ,
+                )
+                sched_str = sched_local.strftime("%Y-%m-%d %H:%M")
+
+                if sched_str in existing:
+                    continue
+
+                bg  = cell.get("effectiveFormat", {}).get("backgroundColor", {})
+                cat = color_to_cat.get(_ck(
+                    bg.get("red", 1.0), bg.get("green", 1.0), bg.get("blue", 1.0)
+                ), "")
+                if not cat:
+                    unmatched += 1
+
+                new_rows.append([sched_str, sched_str, cat, tag, "", 0])
+                existing.add(sched_str)
+
+        if not new_rows:
+            return "✅ Nothing to migrate — Log tab is already up to date."
+
+        new_rows.sort(key=lambda r: r[0])
+
+        # Append in batches of 500
+        for i in range(0, len(new_rows), 500):
+            batch = new_rows[i : i + 500]
+            log_ws.append_rows(batch, value_input_option="USER_ENTERED")
+            time.sleep(1)  # avoid rate limits
+
+        msg = f"✅ Migrated *{len(new_rows)}* entries from Weekly → Log tab."
+        if unmatched:
+            msg += f"\n⚠️ {unmatched} cells had unrecognised colours (copied without category)."
+        return msg
+
+    loop   = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _migrate_sync)
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Retry all done entries whose Sheets write previously failed."""
     if not _is_owner(update):
@@ -1109,7 +1245,8 @@ def main():
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("edit",   cmd_edit))
-    app.add_handler(CommandHandler("sync",   cmd_sync))
+    app.add_handler(CommandHandler("sync",    cmd_sync))
+    app.add_handler(CommandHandler("migrate", cmd_migrate))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def on_startup(application: Application):
