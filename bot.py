@@ -1175,14 +1175,18 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # Prefer backgroundColorStyle.rgbColor (current API field);
                 # fall back to backgroundColor (deprecated but still populated).
+                # IMPORTANT: Google Sheets API omits colour channels whose value
+                # is 0.0 (treating absence as zero).  Default must be 0.0, not
+                # 1.0, otherwise colours like #ffff00 (blue=0) or #03ff00
+                # (blue=0) are misread as white and mapped to "Other".
                 eff_fmt   = cell.get("effectiveFormat", {})
                 rgb       = eff_fmt.get("backgroundColorStyle", {}).get("rgbColor", {})
                 if not rgb:
                     rgb   = eff_fmt.get("backgroundColor", {})
                 cat = _nearest_cat(
-                    rgb.get("red",   1.0),
-                    rgb.get("green", 1.0),
-                    rgb.get("blue",  1.0),
+                    rgb.get("red",   0.0),
+                    rgb.get("green", 0.0),
+                    rgb.get("blue",  0.0),
                 )
                 if not cat:
                     unmatched += 1

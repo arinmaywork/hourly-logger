@@ -186,10 +186,15 @@ def main():
                 continue
 
             # Map background colour → category
-            bg  = cell.get("effectiveFormat", {}).get("backgroundColor", {})
-            r   = bg.get("red",   1.0)
-            g   = bg.get("green", 1.0)
-            b   = bg.get("blue",  1.0)
+            # Note: Sheets API omits channels with value 0.0, so default must
+            # be 0.0 (not 1.0) — otherwise Social/Creative (blue=0) read wrong.
+            eff_fmt = cell.get("effectiveFormat", {})
+            bg = eff_fmt.get("backgroundColorStyle", {}).get("rgbColor", {})
+            if not bg:
+                bg = eff_fmt.get("backgroundColor", {})
+            r   = bg.get("red",   0.0)
+            g   = bg.get("green", 0.0)
+            b   = bg.get("blue",  0.0)
             cat = COLOR_TO_CAT.get(_colour_key(r, g, b), "")
             if not cat:
                 unmatched_colour += 1
