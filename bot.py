@@ -1051,13 +1051,18 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def _migrate_sync() -> str:
         """Synchronous migration — runs in thread pool."""
         # ── Colour → category map ────────────────────────────────────────────
-        def _ck(r, g, b):
-            return (round(float(r), 2), round(float(g), 2), round(float(b), 2))
-
-        color_to_cat = {
-            _ck(info["color"]["red"], info["color"]["green"], info["color"]["blue"]): cat
-            for cat, info in CATEGORIES.items()
-        }
+        # Nearest-colour matching — tolerates Google Sheets palette variations.
+        # Uses Euclidean distance in RGB (0-1) space; threshold 0.25 keeps
+        # categories well-separated (min distance between any two is ~0.35).
+        # White (1,1,1) maps to "⚪️ Other"; empty cells are filtered by tag check.
+        def _nearest_cat(r: float, g: float, b: float) -> str:
+            best, best_d = "", float("inf")
+            for cat_name, info in CATEGORIES.items():
+                c = info["color"]
+                d = ((r - c["red"])**2 + (g - c["green"])**2 + (b - c["blue"])**2) ** 0.5
+                if d < best_d:
+                    best_d, best = d, cat_name
+            return best if best_d <= 0.25 else ""
 
         def row_to_hour(row_1based: int) -> int:
             return row_1based - 22 if row_1based >= 22 else row_1based + 2
@@ -1161,10 +1166,16 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if sched_str in existing:
                     continue
 
+                # Skip future dates — only migrate up to today
+                if actual_date > dt.date.today():
+                    continue
+
                 bg  = cell.get("effectiveFormat", {}).get("backgroundColor", {})
-                cat = color_to_cat.get(_ck(
-                    bg.get("red", 1.0), bg.get("green", 1.0), bg.get("blue", 1.0)
-                ), "")
+                cat = _nearest_cat(
+                    bg.get("red",   1.0),
+                    bg.get("green", 1.0),
+                    bg.get("blue",  1.0),
+                )
                 if not cat:
                     unmatched += 1
 
