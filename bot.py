@@ -1290,7 +1290,9 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("edit",   cmd_edit))
     app.add_handler(CommandHandler("sync",    cmd_sync))
-    app.add_handler(CommandHandler("migrate", cmd_migrate))
+    # /migrate intentionally not registered — one-time migration completed Mar 2026.
+    # The cmd_migrate function is retained for reference only.
+    # app.add_handler(CommandHandler("migrate", cmd_migrate))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def on_startup(application: Application):

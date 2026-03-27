@@ -1,92 +1,116 @@
 # 🕰 Hourly Logger Bot
 
-A robust, asynchronous Telegram bot designed for high-fidelity activity tracking. It uses a persistent SQLite queue to ensure no hourly slots are missed, even during downtime, and synchronizes logs to a visual Google Sheets grid and a raw data backup.
+A robust, asynchronous Telegram bot for high-fidelity activity tracking. It pings you every hour, records your activity into a SQLite queue, and syncs entries to two Google Sheets tabs: a visual **Weekly** grid and a raw **Log** audit trail.
 
 ---
 
 ## 🚀 Overview
-The **Hourly Logger** is a personal productivity tool that pings you every hour to record your activities. It is built to be resilient, category-aware, and highly visual.
+
+The **Hourly Logger** is a personal productivity tool that asks you what you did each hour of the day. It is resilient to downtime, supports category-based breakdowns, and maintains a complete historical record.
 
 ### Core Features
-- **Deterministic Scheduling**: Pings exactly at the start of every hour (HH:00).
-- **Missed Prompt Backfilling**: Automatically detects downtime and prompts you to fill in missed hours upon restart. Duplicate-safe — restarting at the exact turn of an hour will never create double entries.
-- **Three-Step Logging Workflow**:
-  1. **Category**: Choose from predefined categories (Creative, Health, Professional, Social, Other).
-  2. **Activity Tag**: Provide a short label (e.g., "Deep Work", "Exercise") — max 60 characters.
-  3. **Note (Optional)**: Add detailed context or `/skip` to leave blank — max 500 characters.
-- **Edit Feature**: Correct mistakes by modifying any of the last 5 entries using the `/edit` command. Use `/cancel` at the selection screen to return to normal entry mode.
-- **Dual-Layer Storage**:
-    - **SQLite (`queue.db`)**: Local persistence for reliable state management. Each entry stores `tag` and `note` in separate columns alongside a combined `entry_text` field, and tracks whether the Google Sheets write succeeded (`sheets_synced`).
-    - **Google Sheets**:
-        - **Visual Grid**: A "Weekly" tracker that maps hours to rows and dates to columns, applying category-specific background colors.
-        - **Day Start Logic**: The grid follows a 7:00 AM day-start convention. Hours from 7:00 AM to 11:59 PM map to the current calendar date's column. Hours from 12:00 AM to 6:59 AM map to the *previous* calendar date's column, as they are considered part of the previous day's cycle.
-        - **Row Mapping**:
-            - 7:00 AM - 11:00 PM: Rows 5 - 21
-            - 12:00 AM - 6:00 AM: Rows 22 - 28
-        - **Raw Log**: An append-only audit trail of every entry with precise timestamps and lag calculations.
-- **Resilient Sync**: Exponential backoff for Google Sheets API rate limits (429) and generic network errors. Failed writes are flagged in the database and retried on demand via `/sync`.
-- **Non-Blocking Architecture**: All Google Sheets API calls run in a thread pool executor, keeping the asyncio event loop free to process Telegram updates at all times.
+- **Deterministic Scheduling**: Fires exactly at the start of every hour (HH:00).
+- **Missed Prompt Backfilling**: On restart, detects any missed hours and prompts you to fill them in. Duplicate-safe — restarting exactly on the hour never creates double entries.
+- **Three-Step Logging Workflow**: Category → Activity Tag (≤60 chars) → Note (optional, ≤500 chars).
+- **Quick-Log Shortcut**: `/log c Deep Work` enters an hour in one message, bypassing the multi-step flow.
+- **Edit Feature**: Correct any of the last 5 entries with `/edit`.
+- **Dual-Layer Storage**: SQLite (local queue) + Google Sheets (Weekly grid + Log tab).
+- **Resilient Sync**: Exponential backoff on Sheets API rate limits and network errors; retry on demand via `/sync`.
+- **Non-Blocking Architecture**: All Sheets API calls run in a thread pool executor — the asyncio event loop is never blocked.
 
 ---
 
-## 🕹 Usage & Commands
+## 🕹 Commands
 
 | Command | Description |
 | :--- | :--- |
-| `/start` | Initialise the bot and view available commands. |
-| `/status` | Displays queue statistics: Pending, Completed, Skipped, and Unsynced. |
-| `/edit` | Lists the 5 most recent entries. Select one to restart the 3-step logging flow for that hour, updating both SQLite and Google Sheets. |
-| `/skip` | On the **note** step: saves the entry without a note. On the **category** or **tag** step: skips the entire entry, marking it as skipped in the database. |
-| `/cancel` | Abandons the current in-progress flow without marking anything as skipped. The prompt remains pending and will be shown again. Also exits edit-selection mode and returns to normal entry mode. |
-| `/sync` | Retries all entries whose Google Sheets write previously failed. Reports success/failure counts. |
+| `/start` | Initialise the bot and show available commands. |
+| `/log <cat> <tag> [| note]` | **Quick log**: enter an hour in one message using a category shortcut (`c` `h` `p` `s` `o`). Example: `/log c Deep Work \| focused session`. |
+| `/status` | Queue stats (Pending / Done / Skipped / Unsynced) plus a bar-chart breakdown of hours by category for **this week** (Mon → now) and **this year** (1 Jan → now), read from the Log tab. |
+| `/edit` | List the 5 most recent entries. Select one to restart the 3-step flow for that hour, updating both SQLite and Sheets. |
+| `/skip` | During the **note** step: saves the entry without a note. During **category** or **tag** step: marks the slot as skipped. |
+| `/cancel` | Abandons the current in-progress entry without marking it skipped. The prompt remains pending. Also exits edit-selection mode. |
+| `/sync` | Retries all entries whose Sheets write previously failed. Reports success/failure counts. |
+
+### Category Shortcuts (for `/log`)
+
+| Shortcut(s) | Category |
+| :--- | :--- |
+| `c` `cr` `creative` | 🟢 Creative |
+| `h` `he` `health` | 💎 Health |
+| `p` `pr` `prof` `professional` | 🔘 Professional |
+| `s` `so` `social` | 🟡 Social |
+| `o` `ot` `other` | ⚪️ Other |
 
 ---
 
-## 🛠 Technical Architecture
+## 📊 Category & Colour Mapping
+
+These are the exact background colours used in the Weekly grid. The bot uses nearest-colour (Euclidean RGB) matching, so minor palette variations are tolerated.
+
+| Category | Hex | RGB (0–1) | Intent |
+| :--- | :--- | :--- | :--- |
+| 🟢 Creative | `#03ff00` | (0.012, 1.0, 0.0) | Learning, Building, Designing |
+| 💎 Health | `#02ffff` | (0.008, 1.0, 1.0) | Sleep, Exercise, Meals |
+| 🔘 Professional | `#cccccc` | (0.8, 0.8, 0.8) | Deep Work, Tasks, Meetings |
+| 🟡 Social | `#ffff00` | (1.0, 1.0, 0.0) | Calls, Family, Hanging out |
+| ⚪️ Other | `#ffffff` | (1.0, 1.0, 1.0) | Miscellaneous, Chores |
+
+> **Note on Google Sheets API colour encoding**: The Sheets API v4 omits colour channels whose value is `0.0` from the JSON response. The bot always defaults missing channels to `0.0` (not `1.0`) to handle this correctly — a critical detail for colours like Social (`#ffff00`, blue=0) and Creative (`#03ff00`, blue=0).
+
+---
+
+## 🗂 Google Sheets Structure
+
+### Weekly Tab (Visual Grid)
+
+| Row | Content |
+| :--- | :--- |
+| 1 | Week number |
+| 2 | Dates (one column per day, format `m/d/yy`) |
+| 3 | Day label (Mon, Tue, …) |
+| 4 | "Spent" header |
+| 5–21 | Hour slots **7:00 – 23:00** |
+| 22–28 | Hour slots **0:00 – 6:00** (night hours, belong to the *previous* calendar day) |
+| 30+ | Category summary rows |
+
+**Day-start convention**: The logger treats 7:00 AM as the start of a new day. Hours 0:00–6:00 are filed under the *previous* calendar date's column (they are the tail end of that day's cycle).
+
+### Log Tab (Audit Trail)
+
+Append-only record of every submitted entry. This is the source of truth for `/status` breakdowns.
+
+| Column | Content |
+| :--- | :--- |
+| A | Scheduled Time (`YYYY-MM-DD HH:MM`) |
+| B | Submitted Time |
+| C | Category |
+| D | Tag |
+| E | Note |
+| F | Lag (minutes between scheduled and submitted) |
+
+---
+
+## 🏗 Technical Architecture
 
 - **Language**: Python 3.10+
-- **Framework**: `python-telegram-bot` (v22+) using `asyncio`.
-- **Scheduler**: `APScheduler` (AsyncIOScheduler) with `cron` triggers. Shuts down cleanly via `post_stop` lifecycle hook.
-- **Database**: `sqlite3` with a `queue` table managing `pending`, `done`, and `skipped` states. Columns: `id`, `scheduled_ts`, `submitted_ts`, `category`, `tag`, `note`, `entry_text`, `status`, `sheets_synced`.
-- **Integrations**: `gspread` (v6) for Google Sheets API v4 interaction. The authenticated client and spreadsheet object are cached at module level to avoid repeated round-trips. All gspread calls run via `asyncio.run_in_executor` so they never block the event loop.
-- **State Machine**: A global `current_prompt` dictionary tracks the user's progress through the multi-step input. Stages: `category` → `tag` → `note`, plus `edit_selection` for the `/edit` flow.
+- **Framework**: `python-telegram-bot` v22+ with `asyncio`
+- **Scheduler**: `APScheduler` (AsyncIOScheduler) with `cron` triggers. Shuts down via `post_stop` lifecycle hook.
+- **Database**: `sqlite3` — table `queue` with columns `id`, `scheduled_ts`, `submitted_ts`, `category`, `tag`, `note`, `entry_text`, `status` (`pending`/`done`/`skipped`), `sheets_synced`.
+- **Sheets client**: `gspread` v6, authenticated via a service-account `credentials.json` (or `GOOGLE_CREDENTIALS_JSON` env var). Client and spreadsheet object are cached at module level. All calls run via `asyncio.run_in_executor`.
+- **State Machine**: `current_prompt` global dict tracks multi-step input. Stages: `category` → `tag` → `note`, plus `edit_selection` for the `/edit` flow.
+- **`/status` breakdowns**: Read directly from the Log tab (column A = timestamp, column C = category) using string-range filtering on the `YYYY-MM-DD HH:MM` format. Never queries SQLite for hourly breakdowns.
 
 ---
 
-## 📋 Prerequisites
-1. **Telegram Bot**: Create one via [@BotFather](https://t.me/botfather) and get your `TELEGRAM_TOKEN`.
-2. **Google Service Account**:
-   - Create a project in [Google Cloud Console](https://console.cloud.google.com/).
-   - Enable **Google Sheets API** and **Google Drive API**.
-   - Create a **Service Account**, download the `credentials.json`, and share your Google Sheet with the service account email.
-3. **Google Sheet Structure**:
-   - A tab named **"Log"** (created automatically if missing).
-   - A tab named **"Weekly"** (or your `GRID_SHEET_NAME`) with dates in Row 2 (format: `m/d/yy`).
+## ☁️ Deployment: Railway
 
----
+The bot is deployed on [Railway](https://railway.app/). The persistent database lives at `/data/queue.db` (a Railway volume).
 
-## ☁️ Deployment: Google Cloud Platform (Always Free)
-To run this 100% free forever, use a Google Cloud **Compute Engine** VM.
+### Environment Variables
 
-### 1. Create the VM
-- **Machine Type**: `e2-micro` (This is part of the "Always Free" tier).
-- **Region**: `us-central1`, `us-west1`, or `us-east1`.
-- **OS**: Ubuntu 22.04 LTS.
-- **Disk**: 30GB Balanced Persistent Disk.
+Set these in the Railway service's **Variables** panel:
 
-### 2. Initial Server Setup
-SSH into your VM and run:
-```bash
-sudo apt update && sudo apt install -y python3-pip python3-venv git
-git clone https://github.com/arinmaywork/hourly-logger.git
-cd hourly-logger
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 3. Configuration
-Create a `.env` file in the project root:
 ```env
 TELEGRAM_TOKEN=your_token_here
 CHAT_ID=your_personal_telegram_id
@@ -97,55 +121,60 @@ GRID_SHEET_NAME=Weekly
 # Optional overrides (defaults shown)
 SHEET_NAME=Log
 CREDS_FILE=credentials.json
-DB_PATH=queue.db
+DB_PATH=/data/queue.db
 
-# Recommended: inline credentials instead of a file
+# Recommended: inline credentials to avoid managing a file
 GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
 ```
 
-### 4. Background Persistence (systemd)
-To ensure the bot runs 24/7 and restarts on crashes, create a service file:
-`sudo nano /etc/systemd/system/hourly-logger.service`
+### Deploying Updates
 
-Paste the following (adjust `/home/username/` to your path):
-```ini
-[Unit]
-Description=Hourly Logger Telegram Bot
-After=network.target
+The Railway service is connected to this GitHub repository. Push to `main` to trigger an automatic redeploy:
 
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/hourly-logger
-ExecStart=/home/ubuntu/hourly-logger/venv/bin/python bot.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+```bash
+git add .
+git commit -m "your message"
+git push origin main
 ```
 
-**Enable and Start:**
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable hourly-logger
-sudo systemctl start hourly-logger
-```
+### Local Development
 
-### 5. Future Updates
-To update the code after a `git push`:
 ```bash
-cd ~/hourly-logger
-git pull
-sudo systemctl restart hourly-logger
+git clone https://github.com/arinmaywork/hourly-logger.git
+cd hourly-logger
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill in your values
+python bot.py
 ```
 
 ---
 
-## 📊 Category Mapping
-| Category | Color | Intent |
-| :--- | :--- | :--- |
-| 🟢 Creative | Green | Learning, Building, Designing |
-| 💎 Health | Cyan | Sleep, Exercise, Meals |
-| 🔘 Professional | Grey | Deep Work, Tasks, Meetings |
-| 🟡 Social | Yellow | Calls, Family, Hanging out |
-| ⚪️ Other | White | Miscellaneous, Chores |
+## 🔄 Historical Data Migration (Completed — Mar 2026)
+
+All historical entries from the Weekly grid were migrated into the Log tab in March 2026 using the `/migrate` bot command. The command is **intentionally disabled** (handler not registered) to prevent accidental re-runs.
+
+### What the migration did
+- Read every coloured hour-slot cell from the Weekly grid tab via the Sheets API v4 (`includeGridData: true`).
+- Mapped background colour → category using nearest-colour Euclidean matching.
+- Appended each entry to the Log tab in `YYYY-MM-DD HH:MM` format, skipping duplicates and future dates.
+
+### Key technical notes
+- Date cells in Sheets are stored as serial numbers — `formattedValue` (not `effectiveValue`) must be used to read the display string.
+- The data rows start at the row labelled `7:00` in column A (rows before it are the Week No / Date / Day / Spent headers).
+- Colour is read from `effectiveFormat.backgroundColorStyle.rgbColor` first, falling back to the deprecated `effectiveFormat.backgroundColor`. Missing channels default to `0.0` (the Sheets API omits zero-valued channels from the response).
+- The `cmd_migrate` function is retained in `bot.py` for reference; `migrate_weekly_to_log.py` is the equivalent standalone script.
+
+---
+
+## 📋 Prerequisites
+
+1. **Telegram Bot**: Create one via [@BotFather](https://t.me/botfather) and obtain your `TELEGRAM_TOKEN`.
+2. **Google Service Account**:
+   - Create a project in [Google Cloud Console](https://console.cloud.google.com/).
+   - Enable **Google Sheets API** and **Google Drive API**.
+   - Create a service account, download `credentials.json`, and share your spreadsheet with the service-account email (Editor role).
+3. **Google Sheet Structure**:
+   - A tab named **Log** (columns A–F as described above; row 1 = header).
+   - A tab named **Weekly** (or your `GRID_SHEET_NAME`) with the visual grid structure described above.
