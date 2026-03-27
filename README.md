@@ -25,7 +25,7 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | Command | Description |
 | :--- | :--- |
 | `/start` | Initialise the bot and show available commands. |
-| `/log <cat> <tag> [| note]` | **Quick log**: enter an hour in one message using a category shortcut (`c` `h` `p` `s` `o`). Example: `/log c Deep Work \| focused session`. |
+| `/log <cat> <tag> [,,, note]` | **Quick log**: enter an hour in one message using a category shortcut (`c` `h` `p` `s` `o`). Example: `/log c Deep Work,,, focused session`. (Legacy ` \| ` separator also works.) |
 | `/status` | Queue stats (Pending / Done / Skipped / Unsynced) plus a bar-chart breakdown of hours by category for **this week** (Mon → now) and **this year** (1 Jan → now), read from the Log tab. |
 | `/edit` | List the 5 most recent entries. Select one to restart the 3-step flow for that hour, updating both SQLite and Sheets. |
 | `/skip` | During the **note** step: saves the entry without a note. During **category** or **tag** step: marks the slot as skipped. |
