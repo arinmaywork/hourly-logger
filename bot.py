@@ -658,10 +658,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Stage 2: Waiting for tag (+ optional inline note) ─────────────────
-    # Format: "Tag" or "Tag,,, Note" (or legacy "Tag | Note").
+    # Format: "Tag" or "Tag,, Note" (or legacy "Tag | Note").
     if current_prompt.get("stage") == "tag_note":
-        if ",,," in text:
-            tag, note = text.split(",,,", 1)
+        if ",," in text:
+            tag, note = text.split(",,", 1)
             tag  = tag.strip()
             note = note.strip()
         elif " | " in text:
@@ -725,9 +725,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quick one-line entry: /log <category> <tag> [,,, note]
+    """Quick one-line entry: /log <category> <tag> [,, note]
     Bypasses the multi-step flow entirely — fastest way to log an hour.
-    Use ',,,' (three commas) to separate tag from note; legacy ' | ' also works.
+    Use ',,' (three commas) to separate tag from note; legacy ' | ' also works.
 
     Category shortcuts (case-insensitive):
       c / cr / creative       → 🟢 Creative
@@ -738,8 +738,8 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     Examples:
       /log c Deep Work
-      /log h Sleep,,, 7 hrs feel good
-      /log p Tasks,,, quarterly review
+      /log h Sleep,, 7 hrs feel good
+      /log p Tasks,, quarterly review
     """
     global current_prompt
     if not _is_owner(update):
@@ -750,13 +750,13 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         shortcuts = "`c` `h` `p` `s` `o`"
         await update.message.reply_text(
             f"⚡ *Quick Log* — log an hour in one message\n\n"
-            f"*Usage:* `/log <category> <tag> [,,, note]`\n\n"
+            f"*Usage:* `/log <category> <tag> [,, note]`\n\n"
             f"*Category shortcuts:* {shortcuts}\n"
             f"_(Creative, Health, Professional, Social, Other)_\n\n"
             f"*Examples:*\n"
             f"• `/log c Deep Work`\n"
-            f"• `/log h Sleep,,, 7 hrs feel rested`\n"
-            f"• `/log p Tasks,,, quarterly review`",
+            f"• `/log h Sleep,, 7 hrs feel rested`\n"
+            f"• `/log p Tasks,, quarterly review`",
             parse_mode="Markdown",
         )
         return
@@ -786,9 +786,9 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please add a tag after the category, e.g. `/log c Deep Work`", parse_mode="Markdown")
         return
 
-    # Split "Tag,,, Note" (or legacy "Tag | Note") or just "Tag"
-    if ",,," in rest:
-        tag, note = rest.split(",,,", 1)
+    # Split "Tag,, Note" (or legacy "Tag | Note") or just "Tag"
+    if ",," in rest:
+        tag, note = rest.split(",,", 1)
         tag  = tag.strip()
         note = note.strip()
     elif " | " in rest:
