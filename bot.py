@@ -1081,14 +1081,21 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(row_data) < 2:
             return "❌ Weekly grid has fewer than 2 rows — nothing to migrate."
 
-        # ── 2. Find the date row — scan first 3 rows ─────────────────────────
+        # ── 2. Find the date row — scan first 4 rows ─────────────────────────
+        # Date cells in Sheets are stored as serial numbers (not text), so
+        # effectiveValue.stringValue is empty.  formattedValue gives the
+        # display string (e.g. "1/1/26") regardless of underlying cell type.
+        def _cell_text(cell: dict) -> str:
+            return (
+                cell.get("formattedValue", "")
+                or cell.get("effectiveValue", {}).get("stringValue", "")
+                or cell.get("userEnteredValue", {}).get("stringValue", "")
+            ).strip()
+
         def _parse_date_row(row_idx: int) -> dict[int, dt.date]:
             result: dict[int, dt.date] = {}
             for col_idx, cell in enumerate(row_data[row_idx].get("values", [])):
-                raw = (
-                    cell.get("effectiveValue", {}).get("stringValue", "")
-                    or cell.get("userEnteredValue", {}).get("stringValue", "")
-                ).strip()
+                raw = _cell_text(cell)
                 if not raw:
                     continue
                 for fmt in ("%m/%d/%y", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%y"):
@@ -1101,14 +1108,14 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         col_dates: dict[int, dt.date] = {}
         date_row_idx = -1
-        for _i in range(min(3, len(row_data))):
+        for _i in range(min(4, len(row_data))):
             col_dates = _parse_date_row(_i)
-            if col_dates:
+            if len(col_dates) >= 3:   # need at least 3 date columns to be confident
                 date_row_idx = _i
                 break
 
         if not col_dates:
-            return "❌ No date columns found in the first 3 rows of Weekly grid."
+            return "❌ No date columns found in the first 4 rows of Weekly grid."
 
         # ── 3. Load existing Log entries ──────────────────────────────────────
         log_ws   = _get_sheet_sync(SHEET_NAME)
@@ -1140,10 +1147,7 @@ async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 cell = cells[col_idx]
 
-                tag = (
-                    cell.get("effectiveValue", {}).get("stringValue", "")
-                    or cell.get("userEnteredValue", {}).get("stringValue", "")
-                ).strip()
+                tag = _cell_text(cell)
                 if not tag:
                     continue
 
