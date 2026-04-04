@@ -13,7 +13,7 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 - **Missed Prompt Backfilling**: On restart, detects any missed hours and prompts you to fill them in. Duplicate-safe — restarting exactly on the hour never creates double entries.
 - **Three-Step Logging Workflow**: Category → Activity Tag (≤60 chars) → Note (optional, ≤500 chars).
 - **Quick-Log Shortcut**: `/log c Deep Work` enters an hour in one message, bypassing the multi-step flow.
-- **Edit Feature**: Correct any of the last 5 entries with `/edit`.
+- **Edit Feature**: Correct any past entry with `/edit`. Pass a date to browse a specific day (e.g. `/edit 2026-03-28`, `/edit today`, `/edit 28/03`).
 - **Dual-Layer Storage**: SQLite (local queue) + Google Sheets (Weekly grid + Log tab).
 - **Resilient Sync**: Exponential backoff on Sheets API rate limits and network errors; retry on demand via `/sync`.
 - **Non-Blocking Architecture**: All Sheets API calls run in a thread pool executor — the asyncio event loop is never blocked.
@@ -27,7 +27,10 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | `/start` | Initialise the bot and show available commands. |
 | `/log <cat> <tag> [,, note]` | **Quick log**: enter an hour in one message using a category shortcut (`c` `h` `p` `s` `o`). Example: `/log c Deep Work,, focused session`. (Legacy ` \| ` separator also works.) |
 | `/status` | Queue stats (Pending / Done / Skipped / Unsynced) plus a bar-chart breakdown of hours by category for **this week** (Mon → now) and **this year** (1 Jan → now), read from the Log tab. |
-| `/edit` | List the 5 most recent entries. Select one to restart the 3-step flow for that hour, updating both SQLite and Sheets. |
+| `/edit` | List the 5 most recent entries for quick selection. |
+| `/edit today` \| `/edit yesterday` | List all entries for today or yesterday. |
+| `/edit YYYY-MM-DD` | List all entries for a specific date (e.g. `/edit 2026-03-28`). |
+| `/edit DD/MM` \| `/edit DD/MM/YYYY` | List all entries by day/month (e.g. `/edit 28/03`). |
 | `/skip` | During the **note** step: saves the entry without a note. During **category** or **tag** step: marks the slot as skipped. |
 | `/cancel` | Abandons the current in-progress entry without marking it skipped. The prompt remains pending. Also exits edit-selection mode. |
 | `/sync` | Retries all entries whose Sheets write previously failed. Reports success/failure counts. |

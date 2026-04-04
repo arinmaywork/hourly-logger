@@ -152,6 +152,22 @@ def queue_get_recent_done(limit: int = 5):
         ).fetchall()
 
 
+def queue_get_by_date(date: dt.date, tz: ZoneInfo):
+    """Return all done entries whose scheduled time falls on *date* in local timezone."""
+    start_local = datetime(date.year, date.month, date.day, 0, 0, 0, tzinfo=tz)
+    end_local   = datetime(date.year, date.month, date.day, 23, 59, 59, tzinfo=tz)
+    start_utc   = start_local.astimezone(timezone.utc)
+    end_utc     = end_local.astimezone(timezone.utc)
+    with db_connect() as conn:
+        return conn.execute(
+            """SELECT * FROM queue
+               WHERE status='done'
+                 AND scheduled_ts >= ? AND scheduled_ts <= ?
+               ORDER BY scheduled_ts ASC""",
+            (start_utc.isoformat(), end_utc.isoformat()),
+        ).fetchall()
+
+
 def queue_get_by_id(row_id: int):
     with db_connect() as conn:
         return conn.execute(
@@ -913,11 +929,20 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit a past entry.
+
+    Usage:
+      /edit                → last 5 entries
+      /edit today          → all entries for today
+      /edit yesterday      → all entries for yesterday
+      /edit YYYY-MM-DD     → all entries for that date  (e.g. /edit 2026-03-28)
+      /edit DD/MM          → all entries for that day in the current year
+      /edit DD/MM/YYYY     → all entries for that full date
+    """
     global current_prompt
     if not _is_owner(update):
         return
 
-    # Fix: guard against silently discarding an in-progress entry
     if current_prompt and current_prompt.get("stage") != "edit_selection":
         await update.message.reply_text(
             "⚠️ You're currently mid-entry. Use /cancel to abandon it first, "
@@ -925,20 +950,57 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    recent = queue_get_recent_done(5)
-    if not recent:
-        await update.message.reply_text("No entries found to edit.")
+    # ── Parse optional date argument ─────────────────────────────────────────
+    date_arg   = " ".join(context.args).strip().lower() if context.args else ""
+    target_date: dt.date | None = None
+
+    if date_arg in ("today", ""):
+        if date_arg == "today":
+            target_date = datetime.now(TZ).date()
+    elif date_arg == "yesterday":
+        target_date = (datetime.now(TZ) - dt.timedelta(days=1)).date()
+    else:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m"):
+            try:
+                parsed = datetime.strptime(date_arg, fmt)
+                target_date = parsed.replace(
+                    year=datetime.now(TZ).year if fmt == "%d/%m" else parsed.year
+                ).date()
+                break
+            except ValueError:
+                pass
+        if target_date is None:
+            await update.message.reply_text(
+                "⚠️ Unrecognised date. Try:\n"
+                "`/edit 2026-03-28`\n`/edit 28/03`\n`/edit today`\n`/edit yesterday`",
+                parse_mode="Markdown",
+            )
+            return
+
+    # ── Fetch entries ─────────────────────────────────────────────────────────
+    if target_date:
+        rows  = queue_get_by_date(target_date, TZ)
+        title = f"✏️ *Entries for {target_date.strftime('%a %d %b %Y')}:*\n_(Use /cancel to go back)_\n\n"
+    else:
+        rows  = queue_get_recent_done(5)
+        title = "✏️ *Select an entry to edit:*\n_(Use /cancel to go back)_\n\n"
+
+    if not rows:
+        msg = (
+            f"No entries found for {target_date.strftime('%d %b %Y')}."
+            if target_date else "No entries found to edit."
+        )
+        await update.message.reply_text(msg)
         return
 
-    msg           = "✏️ *Select an entry to edit:*\n_(Use /cancel to go back)_\n\n"
+    msg           = title
     keyboard      = []
     recent_ids    = []
     recent_labels = []
 
-    for row in recent:
+    for row in rows:
         ts    = datetime.fromisoformat(row["scheduled_ts"]).astimezone(TZ)
         text  = row["entry_text"] or "(no text)"
-        # Fix: embed row ID in label to guarantee uniqueness even with similar entries
         label = f"[{row['id']}] {ts.strftime('%a %H:%M')} — {text[:18]}"
         msg  += f"• {label}\n"
         keyboard.append([label])
