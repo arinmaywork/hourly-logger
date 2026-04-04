@@ -891,21 +891,23 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     was_edit_selection = current_prompt.get("stage") == "edit_selection"
     current_prompt = {}
 
+    pending_count = queue_count_pending()
+    pending_note  = f"\n_{pending_count} pending entr{'y' if pending_count == 1 else 'ies'} waiting — send any message to resume, or /edit to fix a past entry._" if pending_count else ""
+
     if was_edit_selection:
         await update.message.reply_text(
-            "🚫 Edit cancelled.",
+            f"🚫 Edit cancelled.{pending_note}",
             reply_markup=ReplyKeyboardRemove(),
+            parse_mode="Markdown",
         )
     else:
         await update.message.reply_text(
-            "🚫 Cancelled. The current prompt remains pending and will be shown again.",
+            f"🚫 Cancelled. The current prompt remains pending.{pending_note}",
             reply_markup=ReplyKeyboardRemove(),
+            parse_mode="Markdown",
         )
-
-    # In both cases, surface the next pending entry so the user isn't left stranded
-    next_pending = queue_get_oldest_pending()
-    if next_pending:
-        await send_prompt(context.bot, next_pending)
+    # Do NOT auto-surface next pending — the user cancelled deliberately and may
+    # want to /edit a past entry first.  Sending any message will resume the queue.
 
 
 async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
