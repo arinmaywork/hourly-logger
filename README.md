@@ -10,10 +10,12 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 
 ### Core Features
 - **Deterministic Scheduling**: Fires exactly at the start of every hour (HH:00).
+- **Deterministic Scheduling**: Fires exactly at the start of every hour (HH:00). If a prompt is ignored, it is re-sent every subsequent hour until answered (as long as the user hasn't started filling it in).
 - **Missed Prompt Backfilling**: On restart, detects any missed hours and prompts you to fill them in. Duplicate-safe — restarting exactly on the hour never creates double entries.
 - **Three-Step Logging Workflow**: Category → Activity Tag (≤60 chars) → Note (optional, ≤500 chars).
-- **Quick-Log Shortcut**: `/log c Deep Work` enters an hour in one message, bypassing the multi-step flow.
-- **Edit Feature**: Correct any past entry with `/edit`. Pass a date to browse a specific day (e.g. `/edit 2026-03-28`, `/edit today`, `/edit 28/03`).
+- **Quick-Log Shortcut**: `/log c Deep Work` enters an hour in one message, bypassing the multi-step flow. Use `,,` to separate tag from note: `/log h Sleep,, 7 hrs`.
+- **Edit Feature**: Correct any past entry with `/edit`. Pass a date to browse a specific day (`/edit today`, `/edit 2026-03-28`, `/edit 28/03`). Each entry in the list shows its category emoji, time, and tag so you can identify it at a glance.
+- **Mid-Queue Edit**: Use `/cancel` at any time to pause the pending queue without losing entries — you are then free to `/edit` a past entry. Send any message afterwards to resume the queue.
 - **Dual-Layer Storage**: SQLite (local queue) + Google Sheets (Weekly grid + Log tab).
 - **Resilient Sync**: Exponential backoff on Sheets API rate limits and network errors; retry on demand via `/sync`.
 - **Non-Blocking Architecture**: All Sheets API calls run in a thread pool executor — the asyncio event loop is never blocked.
@@ -27,12 +29,12 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | `/start` | Initialise the bot and show available commands. |
 | `/log <cat> <tag> [,, note]` | **Quick log**: enter an hour in one message using a category shortcut (`c` `h` `p` `s` `o`). Example: `/log c Deep Work,, focused session`. (Legacy ` \| ` separator also works.) |
 | `/status` | Queue stats (Pending / Done / Skipped / Unsynced) plus a bar-chart breakdown of hours by category for **this week** (Mon → now) and **this year** (1 Jan → now), read from the Log tab. |
-| `/edit` | List the 5 most recent entries for quick selection. |
+| `/edit` | List the 5 most recent entries for quick selection. Each item shows `[id] Day HH:MM 🟢 — tag` so you can identify it at a glance. |
 | `/edit today` \| `/edit yesterday` | List all entries for today or yesterday. |
 | `/edit YYYY-MM-DD` | List all entries for a specific date (e.g. `/edit 2026-03-28`). |
 | `/edit DD/MM` \| `/edit DD/MM/YYYY` | List all entries by day/month (e.g. `/edit 28/03`). |
 | `/skip` | During the **note** step: saves the entry without a note. During **category** or **tag** step: marks the slot as skipped. |
-| `/cancel` | Abandons the current in-progress entry without marking it skipped. The prompt remains pending. Also exits edit-selection mode. |
+| `/cancel` | Pauses the current flow without skipping or losing the entry. Shows how many entries are still pending and hints to use `/edit` or send any message to resume. Does **not** auto-surface the next pending entry, so you can go straight to `/edit`. |
 | `/sync` | Retries all entries whose Sheets write previously failed. Reports success/failure counts. |
 | `/fixcats` | Patches blank-category rows in the Log tab by re-reading their background colour from the Weekly grid. Run once after the initial migration to fix the 322 entries that were copied without a category. |
 
@@ -102,7 +104,7 @@ Append-only record of every submitted entry. This is the source of truth for `/s
 - **Scheduler**: `APScheduler` (AsyncIOScheduler) with `cron` triggers. Shuts down via `post_stop` lifecycle hook.
 - **Database**: `sqlite3` — table `queue` with columns `id`, `scheduled_ts`, `submitted_ts`, `category`, `tag`, `note`, `entry_text`, `status` (`pending`/`done`/`skipped`), `sheets_synced`.
 - **Sheets client**: `gspread` v6, authenticated via a service-account `credentials.json` (or `GOOGLE_CREDENTIALS_JSON` env var). Client and spreadsheet object are cached at module level. All calls run via `asyncio.run_in_executor`.
-- **State Machine**: `current_prompt` global dict tracks multi-step input. Stages: `category` → `tag` → `note`, plus `edit_selection` for the `/edit` flow.
+- **State Machine**: `current_prompt` global dict tracks multi-step input. Stages: `category` → `tag_note` → (done), plus `edit_selection` for the `/edit` flow. `/cancel` clears `current_prompt` without auto-surfacing the next pending entry, enabling mid-queue edits.
 - **`/status` breakdowns**: Read directly from the Log tab (column A = timestamp, column C = category) using string-range filtering on the `YYYY-MM-DD HH:MM` format. Never queries SQLite for hourly breakdowns.
 
 ---
