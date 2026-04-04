@@ -1001,9 +1001,10 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_labels = []
 
     for row in rows:
-        ts    = datetime.fromisoformat(row["scheduled_ts"]).astimezone(TZ)
-        text  = row["entry_text"] or "(no text)"
-        label = f"[{row['id']}] {ts.strftime('%a %H:%M')} — {text[:18]}"
+        ts       = datetime.fromisoformat(row["scheduled_ts"]).astimezone(TZ)
+        text     = row["entry_text"] or "(no text)"
+        cat_icon = (row["category"] or "?").split()[0]   # grab just the emoji, e.g. "🟢"
+        label    = f"[{row['id']}] {ts.strftime('%a %H:%M')} {cat_icon} — {text[:18]}"
         msg  += f"• {label}\n"
         keyboard.append([label])
         recent_ids.append(row["id"])
