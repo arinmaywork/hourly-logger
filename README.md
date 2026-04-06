@@ -33,6 +33,10 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | `/monthly 2026-03` \| `/monthly 03` | Category breakdown for a specific month (YYYY-MM or bare month number). |
 | `/weekly` | Category breakdown for the **current week** (Mon–Sun). |
 | `/weekly 2026-03-28` \| `/weekly 28/03` | Category breakdown for the week containing the given date. Also accepts `today` and `yesterday`. |
+| `/trend monthly` | Hours per category for **every month of the current year**, in one view. |
+| `/trend monthly 2025` | Same, for a specific year. |
+| `/trend weekly` | Hours per category for **every week of the current month**. |
+| `/trend weekly 2026-03` | Same, for a specific month (YYYY-MM). |
 | `/edit` | List the 5 most recent entries for quick selection. Each item shows `[id] Day HH:MM 🟢 — tag` so you can identify it at a glance. |
 | `/edit today` \| `/edit yesterday` | List all entries for today or yesterday. |
 | `/edit YYYY-MM-DD` | List all entries for a specific date (e.g. `/edit 2026-03-28`). |

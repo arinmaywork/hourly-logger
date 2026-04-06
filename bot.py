@@ -536,6 +536,38 @@ def _sheets_log_breakdown_sync(
     return breakdown, total
 
 
+def _sheets_log_raw_sync(
+    since_local: datetime,
+    until_local: datetime,
+) -> list[tuple[datetime, str]]:
+    """Return raw (scheduled_datetime_local, category) pairs from the Log tab.
+
+    A single sheet read — callers group/aggregate however they need.
+    """
+    since_str = since_local.strftime("%Y-%m-%d %H:%M")
+    until_str = until_local.strftime("%Y-%m-%d %H:%M")
+
+    sheet    = _get_sheet_sync(SHEET_NAME)
+    all_rows = sheet.get("A:C", value_render_option="FORMATTED_VALUE")
+
+    results: list[tuple[datetime, str]] = []
+    for row in all_rows[1:]:
+        if not row:
+            continue
+        sched = row[0].strip() if len(row) > 0 else ""
+        cat   = row[2].strip() if len(row) > 2 else ""
+        if not sched:
+            continue
+        if not (since_str <= sched <= until_str):
+            continue
+        try:
+            sched_dt = datetime.strptime(sched, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+            results.append((sched_dt, cat))
+        except ValueError:
+            pass
+    return results
+
+
 async def sheets_log_breakdown(
     since_local: datetime,
     until_local: datetime,
@@ -1234,6 +1266,127 @@ async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show how hours per category changed across multiple months or weeks.
+
+    Usage:
+      /trend monthly           → every month of the current year
+      /trend monthly 2025      → every month of 2025
+      /trend weekly            → every week of the current month
+      /trend weekly 2026-03    → every week of March 2026
+    """
+    if not _is_owner(update):
+        return
+
+    # Fixed display order and icons for all categories
+    CAT_ORDER = ["🟢 Creative", "💎 Health", "🔘 Professional", "🟡 Social", "⚪️ Other"]
+    CAT_ICON  = {c: c.split()[0] for c in CAT_ORDER}   # e.g. "🟢 Creative" → "🟢"
+
+    now_local = datetime.now(timezone.utc).astimezone(TZ)
+    args      = context.args if context.args else []
+    mode      = args[0].lower() if args else "monthly"
+
+    if mode not in ("monthly", "weekly"):
+        await update.message.reply_text(
+            "Usage: `/trend monthly [YYYY]` or `/trend weekly [YYYY-MM]`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── Build list of (period_label, since, until, is_current) ───────────────
+    periods: list[tuple[str, datetime, datetime, bool]] = []
+
+    if mode == "monthly":
+        year_arg = int(args[1]) if len(args) > 1 and args[1].isdigit() else now_local.year
+        for m in range(1, 13):
+            first = datetime(year_arg, m, 1, 0, 0, 0, tzinfo=TZ)
+            if first > now_local:
+                break
+            last_day = calendar.monthrange(year_arg, m)[1]
+            until    = datetime(year_arg, m, last_day, 23, 59, 59, tzinfo=TZ)
+            current  = (year_arg == now_local.year and m == now_local.month)
+            if current:
+                until = now_local
+            label = first.strftime("%b %Y")
+            periods.append((label, first, until, current))
+        title = f"📈 *Monthly Trend — {year_arg}*"
+
+    else:  # weekly
+        if len(args) > 1:
+            try:
+                ref = datetime.strptime(args[1], "%Y-%m")
+                ref_year, ref_month = ref.year, ref.month
+            except ValueError:
+                await update.message.reply_text(
+                    "⚠️ Use `/trend weekly YYYY-MM` e.g. `/trend weekly 2026-03`",
+                    parse_mode="Markdown",
+                )
+                return
+        else:
+            ref_year, ref_month = now_local.year, now_local.month
+
+        # Find the Monday on or before the 1st of the month
+        first_of_month = dt.date(ref_year, ref_month, 1)
+        last_day_num   = calendar.monthrange(ref_year, ref_month)[1]
+        last_of_month  = dt.date(ref_year, ref_month, last_day_num)
+        mon = first_of_month - dt.timedelta(days=first_of_month.weekday())
+
+        while mon <= last_of_month:
+            sun     = mon + dt.timedelta(days=6)
+            since   = datetime(mon.year, mon.month, mon.day, 0, 0, 0, tzinfo=TZ)
+            until   = datetime(sun.year, sun.month, sun.day, 23, 59, 59, tzinfo=TZ)
+            current = (mon <= now_local.date() <= sun)
+            if current:
+                until = now_local
+            label = f"{mon.strftime('%d %b')}–{sun.strftime('%d %b')}"
+            periods.append((label, since, until, current))
+            mon += dt.timedelta(days=7)
+
+        month_name = datetime(ref_year, ref_month, 1).strftime("%B %Y")
+        title      = f"📈 *Weekly Trend — {month_name}*"
+
+    if not periods:
+        await update.message.reply_text("No periods to show.")
+        return
+
+    await update.message.reply_text(f"⏳ Loading trend data for {len(periods)} periods…")
+
+    # ── Single Log-tab read covering the full range ───────────────────────────
+    loop    = asyncio.get_running_loop()
+    entries = await loop.run_in_executor(
+        None,
+        partial(_sheets_log_raw_sync, periods[0][1], periods[-1][2]),
+    )
+
+    # ── Group entries by period ───────────────────────────────────────────────
+    def count_period(since: datetime, until: datetime) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for sched_dt, cat in entries:
+            if since <= sched_dt <= until:
+                if cat in CAT_ORDER:
+                    counts[cat] = counts.get(cat, 0) + 1
+                else:
+                    counts["_other"] = counts.get("_other", 0) + 1
+        return counts
+
+    # ── Format output ─────────────────────────────────────────────────────────
+    lines = [title, ""]
+    for label, since, until, is_current in periods:
+        counts = count_period(since, until)
+        total  = sum(counts.values())
+        if total == 0:
+            continue
+        marker    = "✦" if is_current else " "
+        cat_parts = " ".join(
+            f"{CAT_ICON[c]}{counts.get(c, 0)}" for c in CAT_ORDER
+        )
+        lines.append(f"`{marker}{label:<14}` {cat_parts}  *{total}h*")
+
+    lines += ["", f"_{' · '.join(f'{CAT_ICON[c]} {c.split()[-1]}' for c in CAT_ORDER)}_"]
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def cmd_migrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """One-time migration: copy entries from Weekly grid → Log tab.
 
@@ -1670,6 +1823,7 @@ def main():
     app.add_handler(CommandHandler("status",  cmd_status))
     app.add_handler(CommandHandler("monthly", cmd_monthly))
     app.add_handler(CommandHandler("weekly",  cmd_weekly))
+    app.add_handler(CommandHandler("trend",   cmd_trend))
     app.add_handler(CommandHandler("edit",    cmd_edit))
     app.add_handler(CommandHandler("sync",    cmd_sync))
     app.add_handler(CommandHandler("fixcats", cmd_fixcats))
