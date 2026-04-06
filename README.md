@@ -29,6 +29,10 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | `/start` | Initialise the bot and show available commands. |
 | `/log <cat> <tag> [,, note]` | **Quick log**: enter an hour in one message using a category shortcut (`c` `h` `p` `s` `o`). Example: `/log c Deep Work,, focused session`. (Legacy ` \| ` separator also works.) |
 | `/status` | Queue stats (Pending / Done / Skipped / Unsynced) plus a bar-chart breakdown of hours by category for **this week** (Mon → now) and **this year** (1 Jan → now), read from the Log tab. |
+| `/monthly` | Category breakdown for the **current month**. |
+| `/monthly 2026-03` \| `/monthly 03` | Category breakdown for a specific month (YYYY-MM or bare month number). |
+| `/weekly` | Category breakdown for the **current week** (Mon–Sun). |
+| `/weekly 2026-03-28` \| `/weekly 28/03` | Category breakdown for the week containing the given date. Also accepts `today` and `yesterday`. |
 | `/edit` | List the 5 most recent entries for quick selection. Each item shows `[id] Day HH:MM 🟢 — tag` so you can identify it at a glance. |
 | `/edit today` \| `/edit yesterday` | List all entries for today or yesterday. |
 | `/edit YYYY-MM-DD` | List all entries for a specific date (e.g. `/edit 2026-03-28`). |

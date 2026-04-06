@@ -4,6 +4,7 @@ import logging
 import asyncio
 import json
 import time
+import calendar
 import datetime as dt
 from datetime import datetime, timezone
 from functools import partial
@@ -1023,6 +1024,44 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def format_breakdown(data: dict, total_done: int) -> str:
+    """Render a bar-chart category breakdown.
+
+    data may contain a '_uncategorised' sentinel key for entries with no
+    matched category.  Percentages use the largest-remainder method so they
+    always sum to exactly 100%.
+    """
+    if total_done == 0:
+        return "_No entries yet._"
+
+    bar_width     = 10
+    uncategorised = data.get("_uncategorised", 0)
+    cat_data      = {k: v for k, v in data.items() if k != "_uncategorised"}
+
+    all_items: dict[str, int] = dict(cat_data)
+    if uncategorised:
+        all_items["⚠️ Uncategorised"] = uncategorised
+
+    exact   = {cat: cnt / total_done * 100 for cat, cnt in all_items.items()}
+    floored = {cat: int(p) for cat, p in exact.items()}
+    deficit = 100 - sum(floored.values())
+    for cat in sorted(exact, key=lambda c: -(exact[c] % 1))[:deficit]:
+        floored[cat] += 1
+
+    lines = []
+    for cat, count in cat_data.items():
+        pct    = floored[cat]
+        filled = round(pct / 100 * bar_width)
+        bar    = "█" * filled + "░" * (bar_width - filled)
+        lines.append(f"{cat}\n  `{bar}` {pct}% ({count}h)")
+
+    if uncategorised:
+        pct = floored["⚠️ Uncategorised"]
+        lines.append(f"_⚠️ {uncategorised}h unmatched colour ({pct}%)_")
+
+    return "\n".join(lines)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_owner(update):
         return
@@ -1037,57 +1076,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc   = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(TZ)
 
-    # Weekly date range — Monday 00:00 local time to today
     week_start_local = (now_local - dt.timedelta(days=now_local.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-
-    # Yearly date range — 1 Jan 00:00 local time to today
     year_start_local = now_local.replace(
         month=1, day=1, hour=0, minute=0, second=0, microsecond=0
     )
 
-    # Fetch both breakdowns from the Log tab
     week_data, total_week = await sheets_log_breakdown(week_start_local, now_local)
     year_data, total_year = await sheets_log_breakdown(year_start_local, now_local)
-
-    def format_breakdown(data: dict, total_done: int) -> str:
-        """Render a bar-chart breakdown.
-
-        data may contain a '_uncategorised' sentinel key for cells with content
-        but no matching category colour.  Percentages are relative to total_done
-        and use the largest-remainder method to guarantee they sum to 100%.
-        """
-        if total_done == 0:
-            return "_No entries yet._"
-
-        bar_width     = 10
-        uncategorised = data.get("_uncategorised", 0)
-        cat_data      = {k: v for k, v in data.items() if k != "_uncategorised"}
-
-        all_items: dict[str, int] = dict(cat_data)
-        if uncategorised:
-            all_items["⚠️ Uncategorised"] = uncategorised
-
-        # Largest-remainder rounding relative to total_done
-        exact   = {cat: cnt / total_done * 100 for cat, cnt in all_items.items()}
-        floored = {cat: int(p) for cat, p in exact.items()}
-        deficit = 100 - sum(floored.values())
-        for cat in sorted(exact, key=lambda c: -(exact[c] % 1))[:deficit]:
-            floored[cat] += 1
-
-        lines = []
-        for cat, count in cat_data.items():
-            pct    = floored[cat]
-            filled = round(pct / 100 * bar_width)
-            bar    = "█" * filled + "░" * (bar_width - filled)
-            lines.append(f"{cat}\n  `{bar}` {pct}% ({count}h)")
-
-        if uncategorised:
-            pct = floored["⚠️ Uncategorised"]
-            lines.append(f"_⚠️ {uncategorised}h unmatched colour ({pct}%)_")
-
-        return "\n".join(lines)
 
     week_label = (
         f"Mon {week_start_local.day} {week_start_local.strftime('%b')} — now"
@@ -1105,6 +1102,134 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{format_breakdown(week_data, total_week)}\n\n"
         f"📆 *This Year* — _{year_label}_\n"
         f"{format_breakdown(year_data, total_year)}",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_monthly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show category breakdown for a given month.
+
+    Usage:
+      /monthly            → current month
+      /monthly 2026-03    → March 2026
+      /monthly 03         → month 3 of the current year
+    """
+    if not _is_owner(update):
+        return
+
+    now_local = datetime.now(timezone.utc).astimezone(TZ)
+    arg       = " ".join(context.args).strip() if context.args else ""
+
+    # Parse target year + month
+    year, month = now_local.year, now_local.month
+    if arg:
+        parsed = False
+        for fmt in ("%Y-%m", "%m-%Y"):
+            try:
+                d     = datetime.strptime(arg, fmt)
+                year  = d.year
+                month = d.month
+                parsed = True
+                break
+            except ValueError:
+                pass
+        if not parsed:
+            # bare month number
+            try:
+                month  = int(arg)
+                parsed = 1 <= month <= 12
+            except ValueError:
+                pass
+        if not parsed:
+            await update.message.reply_text(
+                "⚠️ Unrecognised month. Try:\n"
+                "`/monthly` — current month\n"
+                "`/monthly 2026-03` — March 2026\n"
+                "`/monthly 03` — month 3 of this year",
+                parse_mode="Markdown",
+            )
+            return
+
+    since_local = datetime(year, month, 1, 0, 0, 0, tzinfo=TZ)
+    last_day    = calendar.monthrange(year, month)[1]
+    until_local = datetime(year, month, last_day, 23, 59, 59, tzinfo=TZ)
+    # Cap at now for the current month
+    if year == now_local.year and month == now_local.month:
+        until_local = now_local
+
+    data, total = await sheets_log_breakdown(since_local, until_local)
+
+    month_name  = since_local.strftime("%B %Y")
+    until_label = "now" if until_local == now_local else until_local.strftime("%d %b")
+    header      = f"📅 *{month_name}* — _1–{until_label} ({total}h)_"
+
+    await update.message.reply_text(
+        f"{header}\n\n{format_breakdown(data, total)}",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show category breakdown for a given week (Mon–Sun).
+
+    Usage:
+      /weekly                → current week
+      /weekly 2026-03-28     → week containing 28 Mar 2026
+      /weekly 28/03          → week containing 28 Mar of this year
+      /weekly today          → current week (same as no arg)
+      /weekly yesterday      → week containing yesterday
+    """
+    if not _is_owner(update):
+        return
+
+    now_local = datetime.now(timezone.utc).astimezone(TZ)
+    arg       = " ".join(context.args).strip().lower() if context.args else ""
+
+    # Resolve target date
+    target_date: dt.date | None = None
+    if not arg or arg == "today":
+        target_date = now_local.date()
+    elif arg == "yesterday":
+        target_date = (now_local - dt.timedelta(days=1)).date()
+    else:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m"):
+            try:
+                parsed      = datetime.strptime(arg, fmt)
+                target_date = parsed.replace(
+                    year=now_local.year if fmt == "%d/%m" else parsed.year
+                ).date()
+                break
+            except ValueError:
+                pass
+        if target_date is None:
+            await update.message.reply_text(
+                "⚠️ Unrecognised date. Try:\n"
+                "`/weekly` — current week\n"
+                "`/weekly 2026-03-28`\n"
+                "`/weekly 28/03`",
+                parse_mode="Markdown",
+            )
+            return
+
+    # Find Monday of the target week
+    mon         = target_date - dt.timedelta(days=target_date.weekday())
+    sun         = mon + dt.timedelta(days=6)
+    since_local = datetime(mon.year, mon.month, mon.day, 0, 0, 0, tzinfo=TZ)
+    until_local = datetime(sun.year, sun.month, sun.day, 23, 59, 59, tzinfo=TZ)
+    is_current  = mon <= now_local.date() <= sun
+    if is_current:
+        until_local = now_local
+
+    data, total = await sheets_log_breakdown(since_local, until_local)
+
+    until_label = "now" if is_current else sun.strftime("%d %b")
+    header      = (
+        f"📅 *Week of {mon.strftime('%d %b %Y')}* "
+        f"— _{mon.strftime('%d %b')}–{until_label} ({total}h)_"
+    )
+
+    await update.message.reply_text(
+        f"{header}\n\n{format_breakdown(data, total)}",
         parse_mode="Markdown",
     )
 
@@ -1542,8 +1667,10 @@ def main():
     app.add_handler(CommandHandler("log",    cmd_log))
     app.add_handler(CommandHandler("skip",   cmd_skip))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("edit",   cmd_edit))
+    app.add_handler(CommandHandler("status",  cmd_status))
+    app.add_handler(CommandHandler("monthly", cmd_monthly))
+    app.add_handler(CommandHandler("weekly",  cmd_weekly))
+    app.add_handler(CommandHandler("edit",    cmd_edit))
     app.add_handler(CommandHandler("sync",    cmd_sync))
     app.add_handler(CommandHandler("fixcats", cmd_fixcats))
     # /migrate intentionally not registered — one-time migration completed Mar 2026.
