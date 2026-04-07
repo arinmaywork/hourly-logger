@@ -118,13 +118,55 @@ Append-only record of every submitted entry. This is the source of truth for `/s
 
 ---
 
-## ☁️ Deployment: Railway
+## ☁️ Deployment: Google Cloud Platform (Always Free)
 
-The bot is deployed on [Railway](https://railway.app/). The persistent database lives at `/data/queue.db` (a Railway volume).
+The bot runs on a GCP **e2-micro** Compute Engine VM, which is part of Google Cloud's [Always Free tier](https://cloud.google.com/free) — genuinely free forever, no expiry. Credit card required at sign-up for identity verification only.
 
-### Environment Variables
+**Always Free limits (e2-micro):**
+- 1 e2-micro VM (2 vCPU burst, 1 GB RAM) — free for the full month in `us-west1`, `us-central1`, or `us-east1`
+- 30 GB standard persistent disk
+- 1 GB outbound network per month
 
-Set these in the Railway service's **Variables** panel:
+### 1. Create the VM
+
+In the [GCP Console](https://console.cloud.google.com/):
+
+- **Navigation** → Compute Engine → VM Instances → **Create Instance**
+- **Name**: `hourly-logger`
+- **Region**: `us-central1` (Iowa) — must be a free-tier region
+- **Machine type**: `e2-micro`
+- **Boot disk**: Ubuntu 22.04 LTS, 30 GB Standard persistent disk
+- **Firewall**: allow HTTPS traffic (the bot only makes outbound calls, no inbound ports needed)
+- Click **Create**
+
+### 2. SSH into the VM
+
+From the VM Instances page, click **SSH** next to your VM, or use:
+
+```bash
+gcloud compute ssh hourly-logger --zone=us-central1-a
+```
+
+### 3. Install dependencies
+
+```bash
+sudo apt update && sudo apt install -y python3-pip python3-venv git
+git clone https://github.com/arinmaywork/hourly-logger.git
+cd hourly-logger
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 4. Configure environment variables
+
+Create a `.env` file:
+
+```bash
+nano .env
+```
+
+Paste and fill in your values:
 
 ```env
 TELEGRAM_TOKEN=your_token_here
@@ -136,21 +178,84 @@ GRID_SHEET_NAME=Weekly
 # Optional overrides (defaults shown)
 SHEET_NAME=Log
 CREDS_FILE=credentials.json
-DB_PATH=/data/queue.db
+DB_PATH=/home/ubuntu/hourly-logger/data/queue.db
 
-# Recommended: inline credentials to avoid managing a file
+# Recommended: inline credentials instead of a file
 GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
 ```
 
-### Deploying Updates
-
-The Railway service is connected to this GitHub repository. Push to `main` to trigger an automatic redeploy:
+Create the data directory for the SQLite DB:
 
 ```bash
-git add .
-git commit -m "your message"
-git push origin main
+mkdir -p /home/ubuntu/hourly-logger/data
 ```
+
+### 5. Run as a systemd service (24/7, auto-restart)
+
+```bash
+sudo nano /etc/systemd/system/hourly-logger.service
+```
+
+Paste (replace `ubuntu` with your actual username if different):
+
+```ini
+[Unit]
+Description=Hourly Logger Telegram Bot
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hourly-logger
+ExecStart=/home/ubuntu/hourly-logger/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable hourly-logger
+sudo systemctl start hourly-logger
+sudo systemctl status hourly-logger   # should show "active (running)"
+```
+
+### 6. Deploying updates
+
+After pushing to GitHub, SSH into the VM and run:
+
+```bash
+cd ~/hourly-logger
+git pull
+sudo systemctl restart hourly-logger
+```
+
+### 7. Useful commands
+
+```bash
+# View live logs
+sudo journalctl -u hourly-logger -f
+
+# Check status
+sudo systemctl status hourly-logger
+
+# Stop / restart
+sudo systemctl stop hourly-logger
+sudo systemctl restart hourly-logger
+```
+
+### Migrating from Railway
+
+If you have an existing Railway deployment, export the SQLite database before shutting it down:
+
+1. In Railway, open a shell on the service and run: `cp /data/queue.db /tmp/queue.db`
+2. Use `railway run cat /tmp/queue.db > queue.db` or the Railway CLI to download it
+3. Upload it to your GCP VM: `gcloud compute scp queue.db hourly-logger:~/hourly-logger/data/queue.db --zone=us-central1-a`
+
+If you can't recover the DB, the bot will start fresh — historical data is safe in the Google Sheets Log tab.
 
 ### Local Development
 
