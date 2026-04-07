@@ -45,6 +45,7 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | `/cancel` | Pauses the current flow without skipping or losing the entry. Shows how many entries are still pending and hints to use `/edit` or send any message to resume. Does **not** auto-surface the next pending entry, so you can go straight to `/edit`. |
 | `/sync` | Retries all entries whose Sheets write previously failed. Reports success/failure counts. |
 | `/fixcats` | Patches blank-category rows in the Log tab by re-reading their background colour from the Weekly grid. Run once after the initial migration to fix the 322 entries that were copied without a category. |
+| `/dedup` | Removes duplicate scheduled-timestamp rows from the Log tab. When a timestamp appears twice (e.g. once from `/migrate` and once from real-time bot logging), the real bot entry is kept (identified by having a submitted time that differs from the scheduled time). Safe to run at any time. |
 
 ### Category Shortcuts (for `/log`)
 

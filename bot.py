@@ -395,7 +395,19 @@ def _sheets_save_row_sync(
                 except gspread.exceptions.CellNotFound:
                     pass  # Fall through to append if not found
 
-            # Fix: header check removed — headers are only written at sheet creation
+            # Upsert: if a row with this scheduled timestamp already exists,
+            # update it rather than appending a duplicate.
+            try:
+                cell = sheet.find(sched_str, in_column=1)
+                if cell:
+                    sheet.update(
+                        f"A{cell.row}:F{cell.row}", [row],
+                        value_input_option="USER_ENTERED",
+                    )
+                    log.info("Row %d upserted in Log: %s", cell.row, row)
+                    return
+            except gspread.exceptions.CellNotFound:
+                pass  # Not found — safe to append
             sheet.append_row(row, value_input_option="USER_ENTERED")
             log.info("Row appended to Log: %s", row)
             return
@@ -1266,6 +1278,78 @@ async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_dedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove duplicate scheduled-timestamp rows from the Log tab.
+
+    When the same hour exists twice (e.g. once from /migrate and once from
+    real-time bot logging), the bot-logged row is kept — identified by having
+    a submitted time that differs from the scheduled time.  If both rows look
+    like real entries, the one with more data (category + tag) is kept.
+    """
+    if not _is_owner(update):
+        return
+
+    await update.message.reply_text("⏳ Scanning Log tab for duplicate timestamps…")
+
+    def _dedup_sync() -> str:
+        sheet    = _get_sheet_sync(SHEET_NAME)
+        all_rows = sheet.get_all_values()   # includes header at index 0
+
+        if len(all_rows) < 2:
+            return "✅ Log tab is empty — nothing to deduplicate."
+
+        # seen: timestamp → (1-based row number, row data)
+        seen:       dict[str, tuple[int, list]] = {}
+        to_delete:  list[int] = []   # 1-based row numbers to remove
+
+        def _row_score(row: list) -> int:
+            """Higher = prefer keeping. Real entries score higher than migrated ones."""
+            sched     = row[0].strip() if len(row) > 0 else ""
+            submitted = row[1].strip() if len(row) > 1 else ""
+            cat       = row[2].strip() if len(row) > 2 else ""
+            tag       = row[3].strip() if len(row) > 3 else ""
+            score = 0
+            if sched != submitted:    score += 2   # real-time entry (not migrated copy)
+            if cat:                   score += 1
+            if tag:                   score += 1
+            return score
+
+        for i, row in enumerate(all_rows[1:], start=2):   # 1-based, skip header
+            sched = row[0].strip() if row else ""
+            if not sched:
+                continue
+            if sched in seen:
+                existing_row_num, existing_row = seen[sched]
+                if _row_score(row) > _row_score(existing_row):
+                    # Newcomer is better — drop the previously-kept row
+                    to_delete.append(existing_row_num)
+                    seen[sched] = (i, row)
+                else:
+                    # Existing is better (or equal) — drop the newcomer
+                    to_delete.append(i)
+            else:
+                seen[sched] = (i, row)
+
+        if not to_delete:
+            return "✅ No duplicate timestamps found — Log tab is clean."
+
+        # Delete in reverse order so row indices don't shift as we go
+        for row_num in sorted(to_delete, reverse=True):
+            sheet.delete_rows(row_num)
+            time.sleep(0.5)   # stay within Sheets API rate limits
+
+        return f"✅ Removed *{len(to_delete)}* duplicate rows from the Log tab."
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _dedup_sync)
+    except Exception as exc:
+        log.exception("dedup failed")
+        result = f"❌ Error: {exc}"
+
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
 async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show how hours per category changed across multiple months or weeks.
 
@@ -1827,6 +1911,7 @@ def main():
     app.add_handler(CommandHandler("edit",    cmd_edit))
     app.add_handler(CommandHandler("sync",    cmd_sync))
     app.add_handler(CommandHandler("fixcats", cmd_fixcats))
+    app.add_handler(CommandHandler("dedup",   cmd_dedup))
     # /migrate intentionally not registered — one-time migration completed Mar 2026.
     # The cmd_migrate function is retained for reference only.
     # app.add_handler(CommandHandler("migrate", cmd_migrate))
