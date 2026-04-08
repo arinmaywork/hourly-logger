@@ -1476,10 +1476,28 @@ async def cmd_dedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not to_delete:
             return "✅ No duplicate timestamps found — Log tab is clean."
 
-        # Delete in reverse order so row indices don't shift as we go
-        for row_num in sorted(to_delete, reverse=True):
-            sheet.delete_rows(row_num)
-            time.sleep(0.5)   # stay within Sheets API rate limits
+        # Batch-delete all rows in a single batchUpdate call (sorted descending
+        # so earlier deletions don't shift the indices of later ones).
+        sheet_id  = sheet.id
+        requests  = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId":    sheet_id,
+                        "dimension":  "ROWS",
+                        "startIndex": row_num - 1,  # 0-indexed
+                        "endIndex":   row_num,       # exclusive
+                    }
+                }
+            }
+            for row_num in sorted(to_delete, reverse=True)
+        ]
+        # Split into chunks of 100 to stay well within API payload limits.
+        CHUNK = 100
+        for i in range(0, len(requests), CHUNK):
+            sheet.spreadsheet.batch_update({"requests": requests[i : i + CHUNK]})
+            if i + CHUNK < len(requests):
+                time.sleep(2)   # brief pause between chunks
 
         return f"✅ Removed *{len(to_delete)}* duplicate rows from the Log tab."
 
@@ -1488,7 +1506,7 @@ async def cmd_dedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await loop.run_in_executor(None, _dedup_sync)
     except Exception as exc:
         log.exception("dedup failed")
-        result = f"❌ Error: {exc}"
+        result = f"❌ Error during dedup — check logs."   # don't echo raw exc (may contain Markdown-breaking chars)
 
     await update.message.reply_text(result, parse_mode="Markdown")
 
