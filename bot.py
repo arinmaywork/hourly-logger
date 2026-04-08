@@ -1282,13 +1282,97 @@ async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_auditlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnose the Log tab for a given month.
+
+    Usage:
+      /auditlog          → current month
+      /auditlog 2026-03  → March 2026
+    """
+    if not _is_owner(update):
+        return
+
+    now_local = datetime.now(timezone.utc).astimezone(TZ)
+    arg       = " ".join(context.args).strip() if context.args else ""
+    if arg:
+        try:
+            ref = datetime.strptime(arg, "%Y-%m").replace(tzinfo=TZ)
+        except ValueError:
+            await update.message.reply_text("⚠️ Use format: `/auditlog 2026-03`", parse_mode="Markdown")
+            return
+    else:
+        ref = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    prefix = ref.strftime("%Y-%m")
+    await update.message.reply_text(f"⏳ Auditing Log tab for {prefix}…")
+
+    def _audit_sync() -> str:
+        sheet    = _get_sheet_sync(SHEET_NAME)
+        all_rows = sheet.get_all_values()   # includes header at index 0
+
+        month_rows = [r for r in all_rows[1:] if r and r[0].strip().startswith(prefix)]
+        total      = len(month_rows)
+
+        # Count by day
+        day_counts: dict[str, int] = {}
+        for r in month_rows:
+            day = r[0].strip()[:10]
+            day_counts[day] = day_counts.get(day, 0) + 1
+
+        # Find days with suspiciously high counts (>24h)
+        over_days = {d: c for d, c in day_counts.items() if c > 24}
+
+        # Exact duplicates (same full timestamp)
+        from collections import Counter
+        ts_counts  = Counter(r[0].strip() for r in month_rows)
+        exact_dups = sum(v - 1 for v in ts_counts.values() if v > 1)
+
+        # Hour-slot duplicates (same YYYY-MM-DD HH — different minutes)
+        hour_counts = Counter(r[0].strip()[:13] for r in month_rows)
+        hour_dups   = sum(v - 1 for v in hour_counts.values() if v > 1)
+
+        # Unique raw timestamp formats seen
+        formats = set()
+        for r in month_rows:
+            ts = r[0].strip()
+            if len(ts) >= 16:
+                formats.add(f"len={len(ts)} sample={ts[:16]!r}")
+
+        lines = [
+            f"📋 *Audit: {prefix}*",
+            f"Total rows: {total}",
+            f"Expected max: {31 if total else '?'} days × 24h = up to 744",
+            f"Exact duplicate timestamps: {exact_dups}",
+            f"Same-hour duplicates (diff minutes): {hour_dups}",
+            f"Days with >24 entries: {len(over_days)}",
+        ]
+        if over_days:
+            top = sorted(over_days.items(), key=lambda x: -x[1])[:5]
+            lines.append("Worst days: " + ", ".join(f"{d}={c}" for d, c in top))
+        if formats:
+            lines.append("TS formats seen: " + "; ".join(sorted(formats)[:3]))
+        return "\n".join(lines)
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _audit_sync)
+    except Exception as exc:
+        log.exception("auditlog failed")
+        result = f"❌ Error: {exc}"
+
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
 async def cmd_dedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove duplicate scheduled-timestamp rows from the Log tab.
 
-    When the same hour exists twice (e.g. once from /migrate and once from
-    real-time bot logging), the bot-logged row is kept — identified by having
-    a submitted time that differs from the scheduled time.  If both rows look
-    like real entries, the one with more data (category + tag) is kept.
+    Handles two kinds of duplicates:
+    1. Exact same timestamp in column A.
+    2. Same hour-slot (YYYY-MM-DD HH) with different minutes — e.g. migration
+       stored HH:00 while real entry stored a different minute.
+
+    In both cases the real bot entry is preferred (submitted ≠ scheduled),
+    then the row with more data (category + tag).
     """
     if not _is_owner(update):
         return
@@ -1302,10 +1386,6 @@ async def cmd_dedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(all_rows) < 2:
             return "✅ Log tab is empty — nothing to deduplicate."
 
-        # seen: timestamp → (1-based row number, row data)
-        seen:       dict[str, tuple[int, list]] = {}
-        to_delete:  list[int] = []   # 1-based row numbers to remove
-
         def _row_score(row: list) -> int:
             """Higher = prefer keeping. Real entries score higher than migrated ones."""
             sched     = row[0].strip() if len(row) > 0 else ""
@@ -1318,21 +1398,41 @@ async def cmd_dedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tag:                   score += 1
             return score
 
+        def _hour_key(ts: str) -> str:
+            """Normalise to YYYY-MM-DD HH for dedup purposes.
+
+            Handles both 'YYYY-MM-DD HH:MM' and any variant where we only
+            care about the hour bucket — so migration entries at HH:00 and
+            real bot entries at HH:MM are treated as the same slot.
+            """
+            ts = ts.strip()
+            if len(ts) >= 13:
+                return ts[:13]   # 'YYYY-MM-DD HH'
+            return ts
+
+        # Two-pass dedup:
+        # Pass 1 — exact timestamp matches (same YYYY-MM-DD HH:MM)
+        # Pass 2 — same hour-slot (same YYYY-MM-DD HH, different minutes)
+        # We run both in a single pass using the hour_key as the canonical key.
+
+        # seen: hour_key → (1-based row number, row data, original timestamp)
+        seen:       dict[str, tuple[int, list, str]] = {}
+        to_delete:  list[int] = []
+
         for i, row in enumerate(all_rows[1:], start=2):   # 1-based, skip header
             sched = row[0].strip() if row else ""
             if not sched:
                 continue
-            if sched in seen:
-                existing_row_num, existing_row = seen[sched]
+            key = _hour_key(sched)
+            if key in seen:
+                existing_row_num, existing_row, _ = seen[key]
                 if _row_score(row) > _row_score(existing_row):
-                    # Newcomer is better — drop the previously-kept row
                     to_delete.append(existing_row_num)
-                    seen[sched] = (i, row)
+                    seen[key] = (i, row, sched)
                 else:
-                    # Existing is better (or equal) — drop the newcomer
                     to_delete.append(i)
             else:
-                seen[sched] = (i, row)
+                seen[key] = (i, row, sched)
 
         if not to_delete:
             return "✅ No duplicate timestamps found — Log tab is clean."
@@ -1914,8 +2014,9 @@ def main():
     app.add_handler(CommandHandler("trend",   cmd_trend))
     app.add_handler(CommandHandler("edit",    cmd_edit))
     app.add_handler(CommandHandler("sync",    cmd_sync))
-    app.add_handler(CommandHandler("fixcats", cmd_fixcats))
-    app.add_handler(CommandHandler("dedup",   cmd_dedup))
+    app.add_handler(CommandHandler("fixcats",  cmd_fixcats))
+    app.add_handler(CommandHandler("dedup",    cmd_dedup))
+    app.add_handler(CommandHandler("auditlog", cmd_auditlog))
     # /migrate intentionally not registered — one-time migration completed Mar 2026.
     # The cmd_migrate function is retained for reference only.
     # app.add_handler(CommandHandler("migrate", cmd_migrate))
