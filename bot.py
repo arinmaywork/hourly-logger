@@ -754,26 +754,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sched_ts = datetime.fromisoformat(current_prompt["scheduled_ts"]).astimezone(timezone.utc)
         is_edit  = current_prompt.get("is_edit", False)
 
-        # Mark done locally first (sheets_synced=False until confirmed)
+        # Mark done in SQLite immediately (sheets_synced=False until background sync confirms).
+        # Data is safe locally — Sheets sync runs in the background so the next prompt
+        # can be shown without waiting for the network round-trip.
         queue_mark_done(queue_id, category, tag, note, now, sheets_synced=False)
 
-        try:
-            await sheets_save_row(sched_ts, now, category, tag, note, is_edit=is_edit)
-            await sheets_update_grid(sched_ts, category, tag)
-            queue_mark_sheets_synced(queue_id, True)
-            status_text = "Updated" if is_edit else "Logged"
-            note_line   = f"\n• Note: {escape_md(note)}" if note else ""
-            await update.message.reply_text(
-                f"✅ *{status_text}!*\n"
-                f"• Category: {escape_md(category)}\n"
-                f"• Tag: {escape_md(tag)}{note_line}",
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            log.error("Sheets write failed: %s", e, exc_info=True)
-            await update.message.reply_text(
-                "⚠️ Saved locally but Google Sheets write failed. Use /sync to retry."
-            )
+        # Reply and surface next prompt immediately — no Sheets wait.
+        status_text = "Updated" if is_edit else "Logged"
+        note_line   = f"\n• Note: {escape_md(note)}" if note else ""
+        await update.message.reply_text(
+            f"✅ *{status_text}!*\n"
+            f"• Category: {escape_md(category)}\n"
+            f"• Tag: {escape_md(tag)}{note_line}",
+            parse_mode="Markdown",
+        )
 
         current_prompt = {}
 
@@ -787,6 +781,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "🎉 All caught up! I'll ping you again next hour."
             )
+
+        # Fire Sheets sync in the background after the user already sees the next prompt.
+        async def _bg_sync():
+            try:
+                await sheets_save_row(sched_ts, now, category, tag, note, is_edit=is_edit)
+                await sheets_update_grid(sched_ts, category, tag)
+                queue_mark_sheets_synced(queue_id, True)
+            except Exception as e:
+                log.error("Background Sheets sync failed for queue_id=%d: %s", queue_id, e, exc_info=True)
+                # sheets_synced stays False — /sync will retry it.
+
+        asyncio.create_task(_bg_sync())
 
 
 async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -881,22 +887,15 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sched_ts = datetime.fromisoformat(pending["scheduled_ts"]).astimezone(timezone.utc)
 
     queue_mark_done(queue_id, category, tag, note, now, sheets_synced=False)
-    try:
-        await sheets_save_row(sched_ts, now, category, tag, note)
-        await sheets_update_grid(sched_ts, category, tag)
-        queue_mark_sheets_synced(queue_id, True)
-        note_line = f"\n• Note: {escape_md(note)}" if note else ""
-        await update.message.reply_text(
-            f"⚡ *Logged!*\n"
-            f"• Category: {escape_md(category)}\n"
-            f"• Tag: {escape_md(tag)}{note_line}",
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        log.error("Sheets write failed in /log: %s", e)
-        await update.message.reply_text(
-            "⚠️ Saved locally but Sheets write failed. Use /sync to retry."
-        )
+
+    # Reply and surface next prompt immediately — Sheets sync runs in background.
+    note_line = f"\n• Note: {escape_md(note)}" if note else ""
+    await update.message.reply_text(
+        f"⚡ *Logged!*\n"
+        f"• Category: {escape_md(category)}\n"
+        f"• Tag: {escape_md(tag)}{note_line}",
+        parse_mode="Markdown",
+    )
 
     next_pending = queue_get_oldest_pending()
     if next_pending:
@@ -906,6 +905,16 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_prompt(context.bot, next_pending)
     else:
         await update.message.reply_text("🎉 All caught up! I'll ping you again next hour.")
+
+    async def _bg_sync_log():
+        try:
+            await sheets_save_row(sched_ts, now, category, tag, note)
+            await sheets_update_grid(sched_ts, category, tag)
+            queue_mark_sheets_synced(queue_id, True)
+        except Exception as e:
+            log.error("Background Sheets sync failed in /log for queue_id=%d: %s", queue_id, e, exc_info=True)
+
+    asyncio.create_task(_bg_sync_log())
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
