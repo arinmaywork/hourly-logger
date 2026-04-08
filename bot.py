@@ -427,7 +427,7 @@ def _sheets_save_row_sync(
         except Exception as e:
             # Fix: generic errors now also get backoff delay, not an instant tight loop
             wait = 2 ** attempt
-            log.error("Sheets log write failed (attempt %d): %s", attempt + 1, e)
+            log.error("Sheets log write failed (attempt %d): %s", attempt + 1, e, exc_info=True)
             _reset_spreadsheet_cache()
             if attempt < 4:
                 time.sleep(wait)
@@ -770,7 +770,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
         except Exception as e:
-            log.error("Sheets write failed: %s", e)
+            log.error("Sheets write failed: %s", e, exc_info=True)
             await update.message.reply_text(
                 "⚠️ Saved locally but Google Sheets write failed. Use /sync to retry."
             )
@@ -1689,7 +1689,7 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
             queue_mark_sheets_synced(row["id"], True)
             success += 1
         except Exception as e:
-            log.error("Sync failed for row %d: %s", row["id"], e)
+            log.error("Sync failed for row %d: %s", row["id"], e, exc_info=True)
             failed += 1
 
     parts = []
