@@ -42,10 +42,12 @@ The **Hourly Logger** is a personal productivity tool that asks you what you did
 | `/edit YYYY-MM-DD` | List all entries for a specific date (e.g. `/edit 2026-03-28`). |
 | `/edit DD/MM` \| `/edit DD/MM/YYYY` | List all entries by day/month (e.g. `/edit 28/03`). |
 | `/skip` | During the **note** step: saves the entry without a note. During **category** or **tag** step: marks the slot as skipped. |
+| `/skipall` | Skips all pending entries **older than today** in one command. Useful after the bot was offline for a period and a large backlog of old prompts has accumulated. Today's pending entries are left intact. |
 | `/cancel` | Pauses the current flow without skipping or losing the entry. Shows how many entries are still pending and hints to use `/edit` or send any message to resume. Does **not** auto-surface the next pending entry, so you can go straight to `/edit`. |
 | `/sync` | Retries all entries whose Sheets write previously failed. Reports success/failure counts. |
-| `/fixcats` | Patches blank-category rows in the Log tab by re-reading their background colour from the Weekly grid. Run once after the initial migration to fix the 322 entries that were copied without a category. |
-| `/dedup` | Removes duplicate scheduled-timestamp rows from the Log tab. When a timestamp appears twice (e.g. once from `/migrate` and once from real-time bot logging), the real bot entry is kept (identified by having a submitted time that differs from the scheduled time). Safe to run at any time. |
+| `/fixcats` | Patches blank-category rows in the Log tab by re-reading their background colour from the Weekly grid. Run once after the initial migration to fix entries that were copied without a category. |
+| `/dedup` | Removes duplicate hour-slot rows from the Log tab. Handles both exact timestamp duplicates and same-hour duplicates with different minutes (e.g. migration entry at `HH:00` vs real bot entry at `HH:23`). Keeps the real bot entry; uses a single batch API call so it completes in seconds even for hundreds of rows. Safe to run at any time. |
+| `/auditlog` | Diagnoses the Log tab for a given month. Reports total rows, exact vs same-hour duplicate counts, days with >24 entries, and timestamp format samples. Usage: `/auditlog` (current month) or `/auditlog 2026-03`. |
 
 ### Category Shortcuts (for `/log`)
 
@@ -115,6 +117,7 @@ Append-only record of every submitted entry. This is the source of truth for `/s
 - **Sheets client**: `gspread` v6. Authentication priority: (1) `GOOGLE_CREDENTIALS_JSON` env var (full service-account JSON), (2) `credentials.json` file, (3) **Application Default Credentials** (ADC) — used automatically when running on a GCP VM with the correct instance scopes. Client and spreadsheet object are cached at module level. All calls run via `asyncio.run_in_executor`.
 - **State Machine**: `current_prompt` global dict tracks multi-step input. Stages: `category` → `tag_note` → (done), plus `edit_selection` for the `/edit` flow. `/cancel` clears `current_prompt` without auto-surfacing the next pending entry, enabling mid-queue edits.
 - **`/status` breakdowns**: Read directly from the Log tab (column A = timestamp, column C = category) using string-range filtering on the `YYYY-MM-DD HH:MM` format. Never queries SQLite for hourly breakdowns.
+- **Dedup strategy**: `/dedup` normalises timestamps to `YYYY-MM-DD HH` (hour precision) before comparing, catching both exact duplicates and migration/bot pairs that share the same hour but differ in minutes. All row deletions are batched into a single `spreadsheet.batch_update()` call (chunked at 100 requests) to avoid write-quota limits.
 
 ---
 
@@ -288,6 +291,35 @@ pip install -r requirements.txt
 cp .env.example .env   # fill in your values
 python bot.py
 ```
+
+---
+
+## 🛠 Troubleshooting
+
+### Bot not responding / 409 Conflict in logs
+`telegram.error.Conflict: terminated by other getUpdates request` means two bot instances are polling simultaneously. Only one instance may run at a time.
+
+- Check for a stale deployment on Railway (or any other platform) and delete it.
+- Check for duplicate processes on the VM: `ps aux | grep bot.py`. If more than one appears, run `sudo pkill -f bot.py && sudo systemctl start hourly-logger`.
+
+### Google Sheets write failure: 403 insufficient scopes
+The VM's OAuth token doesn't include Drive/Sheets. Run from **Cloud Shell** (not the VM terminal):
+```bash
+gcloud compute instances stop INSTANCE --zone=ZONE --project=PROJECT
+gcloud compute instances set-service-account INSTANCE \
+  --zone=ZONE --project=PROJECT \
+  --scopes=cloud-platform,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets
+gcloud compute instances start INSTANCE --zone=ZONE --project=PROJECT
+```
+
+### Large backlog of old pending prompts after downtime
+If the bot was offline for hours or days, `backfill_missed_prompts()` will queue all the missed hours on restart. Use `/skipall` to dismiss everything before today in one command, then fill in today's entries normally.
+
+### Monthly totals exceed maximum hours (duplicate data)
+Run `/auditlog YYYY-MM` to count rows and identify the duplication pattern, then run `/dedup` to clean them up. The most common cause is the one-time historical migration creating entries at `HH:00` while the real-time bot also logged entries at `HH:MM` for the same hour.
+
+### DeprecationWarning: worksheet.update() argument order
+A non-fatal warning from gspread when writing to the Weekly grid. Does not affect functionality. Will be resolved in a future dependency update.
 
 ---
 
