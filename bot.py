@@ -329,8 +329,8 @@ def _get_spreadsheet():
     if _gspread_spreadsheet is not None:
         return _gspread_spreadsheet
 
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    if creds_json and creds_json.startswith('{"type"') and "..." not in creds_json:
         info  = json.loads(creds_json)
         creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     elif os.path.exists(CREDS_FILE):
