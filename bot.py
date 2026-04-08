@@ -11,6 +11,7 @@ from functools import partial
 from zoneinfo import ZoneInfo
 
 import gspread
+import google.auth
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -332,8 +333,11 @@ def _get_spreadsheet():
     if creds_json:
         info  = json.loads(creds_json)
         creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    else:
+    elif os.path.exists(CREDS_FILE):
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+    else:
+        # Running on GCP VM — use Application Default Credentials (no key file needed)
+        creds, _ = google.auth.default(scopes=SCOPES)
 
     client = gspread.Client(auth=creds)  # replaces deprecated gspread.authorize()
     _gspread_spreadsheet = client.open_by_key(SPREADSHEET_ID)
