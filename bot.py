@@ -959,6 +959,45 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # want to /edit a past entry first.  Sending any message will resume the queue.
 
 
+async def cmd_skipall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Skip all pending entries older than the start of today (local time).
+
+    Useful after the bot was offline for a period and a large backlog of
+    yesterday's / older prompts has accumulated. Today's pending entries
+    are left intact so they can still be filled in normally.
+    """
+    global current_prompt
+    if not _is_owner(update):
+        return
+
+    now_local   = datetime.now(timezone.utc).astimezone(TZ)
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_start.astimezone(timezone.utc)
+
+    def _skipall_sync() -> int:
+        with db_connect() as conn:
+            result = conn.execute(
+                "UPDATE queue SET status='skipped', submitted_ts=? "
+                "WHERE status='pending' AND scheduled_ts < ?",
+                (datetime.now(timezone.utc).isoformat(), today_start_utc.isoformat()),
+            )
+            return result.rowcount
+
+    loop    = asyncio.get_running_loop()
+    skipped = await loop.run_in_executor(None, _skipall_sync)
+
+    current_prompt = {}   # clear any active flow
+    remaining = queue_count_pending()
+
+    msg = f"⏭ Skipped *{skipped}* old pending entr{'y' if skipped == 1 else 'ies'} (before today)."
+    if remaining:
+        msg += f"\n_{remaining} entr{'y' if remaining == 1 else 'ies'} from today still pending._"
+    else:
+        msg += "\n_No pending entries remaining._"
+
+    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
+
+
 async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_prompt
     if not _is_owner(update):
@@ -2006,7 +2045,8 @@ def main():
 
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("log",    cmd_log))
-    app.add_handler(CommandHandler("skip",   cmd_skip))
+    app.add_handler(CommandHandler("skip",    cmd_skip))
+    app.add_handler(CommandHandler("skipall", cmd_skipall))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("status",  cmd_status))
     app.add_handler(CommandHandler("monthly", cmd_monthly))
