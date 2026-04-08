@@ -112,7 +112,7 @@ Append-only record of every submitted entry. This is the source of truth for `/s
 - **Framework**: `python-telegram-bot` v22+ with `asyncio`
 - **Scheduler**: `APScheduler` (AsyncIOScheduler) with `cron` triggers. Shuts down via `post_stop` lifecycle hook.
 - **Database**: `sqlite3` — table `queue` with columns `id`, `scheduled_ts`, `submitted_ts`, `category`, `tag`, `note`, `entry_text`, `status` (`pending`/`done`/`skipped`), `sheets_synced`.
-- **Sheets client**: `gspread` v6, authenticated via a service-account `credentials.json` (or `GOOGLE_CREDENTIALS_JSON` env var). Client and spreadsheet object are cached at module level. All calls run via `asyncio.run_in_executor`.
+- **Sheets client**: `gspread` v6. Authentication priority: (1) `GOOGLE_CREDENTIALS_JSON` env var (full service-account JSON), (2) `credentials.json` file, (3) **Application Default Credentials** (ADC) — used automatically when running on a GCP VM with the correct instance scopes. Client and spreadsheet object are cached at module level. All calls run via `asyncio.run_in_executor`.
 - **State Machine**: `current_prompt` global dict tracks multi-step input. Stages: `category` → `tag_note` → (done), plus `edit_selection` for the `/edit` flow. `/cancel` clears `current_prompt` without auto-surfacing the next pending entry, enabling mid-queue edits.
 - **`/status` breakdowns**: Read directly from the Log tab (column A = timestamp, column C = category) using string-range filtering on the `YYYY-MM-DD HH:MM` format. Never queries SQLite for hourly breakdowns.
 
@@ -137,7 +137,19 @@ In the [GCP Console](https://console.cloud.google.com/):
 - **Machine type**: `e2-micro`
 - **Boot disk**: Ubuntu 22.04 LTS, 30 GB Standard persistent disk
 - **Firewall**: allow HTTPS traffic (the bot only makes outbound calls, no inbound ports needed)
+- **Access scopes** → Select "Set access for each API" or use the custom scope approach below
 - Click **Create**
+
+> **Important — VM OAuth scopes**: The VM's service account must have access to the Google Sheets and Drive APIs. If you see `[403]: Request had insufficient authentication scopes` in the logs, run the following from **Cloud Shell** (not the VM's SSH terminal):
+>
+> ```bash
+> gcloud compute instances stop hourly-logger --zone=us-central1-a --project=YOUR_PROJECT
+> gcloud compute instances set-service-account hourly-logger \
+>   --zone=us-central1-a \
+>   --project=YOUR_PROJECT \
+>   --scopes=cloud-platform,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets
+> gcloud compute instances start hourly-logger --zone=us-central1-a --project=YOUR_PROJECT
+> ```
 
 ### 2. SSH into the VM
 
@@ -180,9 +192,17 @@ SHEET_NAME=Log
 CREDS_FILE=credentials.json
 DB_PATH=/home/ubuntu/hourly-logger/data/queue.db
 
-# Recommended: inline credentials instead of a file
-GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
+# Google Sheets authentication (choose one approach — see below)
+# GOOGLE_CREDENTIALS_JSON={"type":"service_account","project_id":"...","private_key":"..."}
 ```
+
+**Google Sheets authentication options (in priority order):**
+
+1. **`GOOGLE_CREDENTIALS_JSON` env var** — paste the full service-account JSON as a single line. Best for portability across environments.
+2. **`credentials.json` file** — place the service-account key file in the project directory.
+3. **Application Default Credentials (ADC)** — if neither of the above is set, the bot uses the VM's own identity automatically. This is the recommended approach on GCP VMs (no key file needed), as long as the VM was created with the correct OAuth scopes (see step 1 note above). Share the spreadsheet with the VM's service account email (`PROJECT_NUMBER-compute@developer.gserviceaccount.com`).
+
+> **Note**: Some GCP organisations enforce the policy `iam.disableServiceAccountKeyCreation`, which blocks downloading service-account JSON keys. In this case, use ADC (option 3).
 
 Create the data directory for the SQLite DB:
 
@@ -291,10 +311,10 @@ All historical entries from the Weekly grid were migrated into the Log tab in Ma
 ## 📋 Prerequisites
 
 1. **Telegram Bot**: Create one via [@BotFather](https://t.me/botfather) and obtain your `TELEGRAM_TOKEN`.
-2. **Google Service Account**:
-   - Create a project in [Google Cloud Console](https://console.cloud.google.com/).
-   - Enable **Google Sheets API** and **Google Drive API**.
-   - Create a service account, download `credentials.json`, and share your spreadsheet with the service-account email (Editor role).
+2. **Google Cloud Setup**:
+   - In [Google Cloud Console](https://console.cloud.google.com/), enable **Google Sheets API** and **Google Drive API** for your project (Cloud Shell: `gcloud services enable sheets.googleapis.com drive.googleapis.com`).
+   - **On GCP VM (recommended)**: Share your spreadsheet with the VM's default compute service account — `PROJECT_NUMBER-compute@developer.gserviceaccount.com` — as Editor. No key file needed; the bot uses ADC automatically.
+   - **Other environments**: Create a service account, download `credentials.json` (or copy its JSON into `GOOGLE_CREDENTIALS_JSON`), and share the spreadsheet with the service-account email as Editor.
 3. **Google Sheet Structure**:
    - A tab named **Log** (columns A–F as described above; row 1 = header).
    - A tab named **Weekly** (or your `GRID_SHEET_NAME`) with the visual grid structure described above.
