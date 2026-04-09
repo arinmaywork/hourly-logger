@@ -147,15 +147,16 @@ def queue_count_pending() -> int:
 
 
 def queue_get_recent_done(limit: int = 5):
+    """Return the most recent done OR skipped entries (skipped are editable too)."""
     with db_connect() as conn:
         return conn.execute(
-            "SELECT * FROM queue WHERE status='done' ORDER BY scheduled_ts DESC LIMIT ?",
+            "SELECT * FROM queue WHERE status IN ('done','skipped') ORDER BY scheduled_ts DESC LIMIT ?",
             (limit,),
         ).fetchall()
 
 
 def queue_get_by_date(date: dt.date, tz: ZoneInfo):
-    """Return all done entries whose scheduled time falls on *date* in local timezone."""
+    """Return all done or skipped entries whose scheduled time falls on *date* in local timezone."""
     start_local = datetime(date.year, date.month, date.day, 0, 0, 0, tzinfo=tz)
     end_local   = datetime(date.year, date.month, date.day, 23, 59, 59, tzinfo=tz)
     start_utc   = start_local.astimezone(timezone.utc)
@@ -163,7 +164,7 @@ def queue_get_by_date(date: dt.date, tz: ZoneInfo):
     with db_connect() as conn:
         return conn.execute(
             """SELECT * FROM queue
-               WHERE status='done'
+               WHERE status IN ('done','skipped')
                  AND scheduled_ts >= ? AND scheduled_ts <= ?
                ORDER BY scheduled_ts ASC""",
             (start_utc.isoformat(), end_utc.isoformat()),
@@ -1100,7 +1101,11 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in rows:
         ts       = datetime.fromisoformat(row["scheduled_ts"]).astimezone(TZ)
         text     = row["entry_text"] or "(no text)"
-        cat_icon = (row["category"] or "?").split()[0]   # grab just the emoji, e.g. "🟢"
+        if row["status"] == "skipped":
+            cat_icon = "⏭"
+            text     = "(skipped)"
+        else:
+            cat_icon = (row["category"] or "?").split()[0]   # grab just the emoji, e.g. "🟢"
         label    = f"[{row['id']}] {ts.strftime('%a %H:%M')} {cat_icon} — {text[:18]}"
         msg  += f"• {label}\n"
         keyboard.append([label])
@@ -2050,12 +2055,14 @@ async def hourly_job(bot):
     queue_add_prompt(scheduled)  # INSERT OR IGNORE prevents duplicate on startup race
     log.info("Hourly job fired. Scheduled TS: %s", scheduled.isoformat())
 
-    # Send a prompt (or re-send as a reminder) unless the user is actively
-    # mid-flow — i.e. they have already selected a category and are currently
-    # typing the tag or note.  Stages beyond "category" mean real work is in
-    # progress and we must not overwrite current_prompt.
-    mid_flow = bool(current_prompt and current_prompt.get("stage") not in ("category",))
-    if not mid_flow:
+    # Only send a prompt when completely idle (current_prompt is empty).
+    # If the user is at any stage — including "category" (just received a prompt
+    # but hasn't replied yet) — do NOT interrupt.  Sending a second send_prompt
+    # while the user is actively filling a backlog overwrites current_prompt and
+    # causes the in-progress entry to vanish.  The new hour was already added to
+    # the queue above; the user will reach it naturally once the backlog clears.
+    # Re-send as a reminder ONLY when the user is fully idle.
+    if not current_prompt:
         pending = queue_get_oldest_pending()
         if pending:
             await send_prompt(bot, pending)
