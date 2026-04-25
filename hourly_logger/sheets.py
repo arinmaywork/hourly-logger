@@ -365,12 +365,51 @@ def _update_grid_sync(scheduled_ts: datetime, category: str, tag: str) -> GridUp
     return outcome
 
 
+def _parse_sheet_sched(s: str, tz: Any) -> datetime | None:
+    """Parse a Sheet 'Scheduled Time' cell into a tz-aware datetime.
+
+    Sheets cells written via ``USER_ENTERED`` are auto-coerced to date
+    values and re-rendered using the column's number format. If the
+    column is formatted ``YYYY-MM-DD H:MM`` (single-digit hour) instead
+    of ``YYYY-MM-DD HH:MM``, hours 0-9 come back without leading zeros
+    (``'2026-04-01 4:00'``). The previous lex compare against
+    ``'YYYY-MM-DD HH:MM'`` bounds excluded such rows from /trend,
+    /weekly, /monthly, and /status windows because ``'4' > '0'`` at the
+    hour position. Parse to a real datetime and let the caller compare
+    that, which sidesteps the formatting entirely.
+
+    Accepts ``YYYY-MM-DD HH:MM[:SS]`` or ``YYYY-MM-DDTHH:MM[:SS]`` with
+    1- or 2-digit hour/minute. Returns ``None`` for header / blank /
+    unrecognised values so callers can skip them silently.
+    """
+    s = s.strip()
+    if not s:
+        return None
+    sep_idx = -1
+    for sep in (" ", "T"):
+        i = s.find(sep)
+        if i != -1:
+            sep_idx = i
+            break
+    if sep_idx == -1:
+        return None
+    date_part = s[:sep_idx]
+    time_part = s[sep_idx + 1 :]
+    try:
+        y_s, m_s, d_s = date_part.split("-")
+        time_bits = time_part.split(":")
+        h_s = time_bits[0]
+        mi_s = time_bits[1] if len(time_bits) > 1 else "0"
+        return datetime(
+            int(y_s), int(m_s), int(d_s), int(h_s), int(mi_s), tzinfo=tz,
+        )
+    except (ValueError, IndexError):
+        return None
+
+
 def _log_breakdown_sync(
     since_local: datetime, until_local: datetime,
 ) -> tuple[dict[str, int], int]:
-    since_str = since_local.strftime("%Y-%m-%d %H:%M")
-    until_str = until_local.strftime("%Y-%m-%d %H:%M")
-
     def _do() -> tuple[dict[str, int], int]:
         sheet = get_worksheet(settings.SHEET_NAME)
         all_rows = sheet.get("A:C", value_render_option="FORMATTED_VALUE")
@@ -381,7 +420,8 @@ def _log_breakdown_sync(
                 continue
             sched = row[0].strip() if len(row) > 0 else ""
             cat = row[2].strip() if len(row) > 2 else ""
-            if not sched or not (since_str <= sched <= until_str):
+            sched_dt = _parse_sheet_sched(sched, settings.tz)
+            if sched_dt is None or not (since_local <= sched_dt <= until_local):
                 continue
             total += 1
             if cat:
@@ -400,9 +440,6 @@ def _log_breakdown_sync(
 def _log_raw_sync(
     since_local: datetime, until_local: datetime,
 ) -> list[tuple[datetime, str]]:
-    since_str = since_local.strftime("%Y-%m-%d %H:%M")
-    until_str = until_local.strftime("%Y-%m-%d %H:%M")
-
     def _do() -> list[tuple[datetime, str]]:
         sheet = get_worksheet(settings.SHEET_NAME)
         all_rows = sheet.get("A:C", value_render_option="FORMATTED_VALUE")
@@ -412,15 +449,10 @@ def _log_raw_sync(
                 continue
             sched = row[0].strip() if len(row) > 0 else ""
             cat = row[2].strip() if len(row) > 2 else ""
-            if not sched or not (since_str <= sched <= until_str):
+            sched_dt = _parse_sheet_sched(sched, settings.tz)
+            if sched_dt is None or not (since_local <= sched_dt <= until_local):
                 continue
-            try:
-                sched_dt = datetime.strptime(sched, "%Y-%m-%d %H:%M").replace(
-                    tzinfo=settings.tz
-                )
-                results.append((sched_dt, cat))
-            except ValueError:
-                continue
+            results.append((sched_dt, cat))
         return results
 
     return _with_retry(_do, breaker=log_tab_breaker, label="log_raw")

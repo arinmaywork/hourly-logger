@@ -439,13 +439,23 @@ def _gaps_sync(year: int, month: int) -> str:
         have.add(parsed)
 
     last_day = calendar.monthrange(year, month)[1]
-    today_local = datetime.now(settings.tz).date()
-    if today_local.year == year and today_local.month == month:
+    now_local = datetime.now(settings.tz)
+    today_local = now_local.date()
+    is_current_month = today_local.year == year and today_local.month == month
+    if is_current_month:
         last_day = today_local.day
 
+    # For the current day specifically, only expect hours that have already
+    # ticked over — the as-yet-unfired hour-end prompts shouldn't count as
+    # "missing" (false positives from a /gaps run mid-afternoon used to
+    # report every remaining hour of today as a gap).
     expected: list[tuple[int, int, int, int]] = []
     for day in range(1, last_day + 1):
-        for hour in range(24):
+        if is_current_month and day == today_local.day:
+            max_hour = now_local.hour  # exclusive upper bound
+        else:
+            max_hour = 24
+        for hour in range(max_hour):
             expected.append((year, month, day, hour))
 
     missing = [t for t in expected if t not in have]
