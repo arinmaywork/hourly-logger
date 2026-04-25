@@ -120,6 +120,85 @@ def test_skipall_older_than_skips_only_old_pending(tmp_db_path: str) -> None:
     assert counts["skipped"] == 1
 
 
+# ── Migration v5: legacy +00:00 → canonical Z ───────────────────────────────
+
+
+def _apply_migrations_through(conn: sqlite3.Connection, max_version: int) -> None:
+    """Run schema migrations 1..max_version (exclusive of v5+) so we can
+    seed legacy data and then explicitly invoke v5."""
+    database._ensure_migrations_table(conn)
+    for version, migrate in database.MIGRATIONS:
+        if version > max_version:
+            break
+        conn.execute("BEGIN")
+        migrate(conn)
+        database._record(conn, version)
+        conn.execute("COMMIT")
+
+
+def test_migration_v5_rewrites_legacy_plus0000_to_canonical_z(tmp_db_path: str) -> None:
+    """A legacy ``+00:00`` row with no canonical-Z twin must be rewritten in place."""
+    with database.db_connect() as conn:
+        _apply_migrations_through(conn, 4)
+        # Insert a legacy-format row directly (bypassing canonical_ts()).
+        conn.execute(
+            "INSERT INTO queue (scheduled_ts, status, sheets_synced) "
+            "VALUES (?, 'done', 1)",
+            ("2026-04-01T04:30:00+00:00",),
+        )
+        conn.commit()
+
+        database._migration_v5(conn)
+
+        rows = conn.execute("SELECT scheduled_ts FROM queue").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "2026-04-01T04:30:00Z"
+
+
+def test_migration_v5_drops_legacy_when_canonical_twin_exists(tmp_db_path: str) -> None:
+    """When both legacy ``+00:00`` and canonical ``Z`` rows exist for the
+    same instant (production state after Bug #11 + /repair), the legacy
+    row must be dropped without raising IntegrityError."""
+    with database.db_connect() as conn:
+        _apply_migrations_through(conn, 4)
+        conn.execute(
+            "INSERT INTO queue (scheduled_ts, status, sheets_synced, category) "
+            "VALUES (?, 'done', 1, 'legacy')",
+            ("2026-04-01T04:30:00+00:00",),
+        )
+        conn.execute(
+            "INSERT INTO queue (scheduled_ts, status, sheets_synced, category) "
+            "VALUES (?, 'done', 1, 'canonical')",
+            ("2026-04-01T04:30:00Z",),
+        )
+        conn.commit()
+
+        database._migration_v5(conn)
+
+        rows = conn.execute(
+            "SELECT scheduled_ts, category FROM queue"
+        ).fetchall()
+        # Only the canonical-Z row survives; the legacy +00:00 is dropped.
+        assert [(r[0], r[1]) for r in rows] == [("2026-04-01T04:30:00Z", "canonical")]
+
+
+def test_migration_v5_is_idempotent_on_already_canonical_rows(tmp_db_path: str) -> None:
+    """Re-running v5 on already-canonical rows must be a no-op."""
+    with database.db_connect() as conn:
+        _apply_migrations_through(conn, 4)
+        conn.execute(
+            "INSERT INTO queue (scheduled_ts, status) VALUES (?, 'done')",
+            ("2026-04-01T04:30:00Z",),
+        )
+        conn.commit()
+
+        database._migration_v5(conn)
+        database._migration_v5(conn)  # second call must not change anything
+
+        rows = conn.execute("SELECT scheduled_ts FROM queue").fetchall()
+        assert [r[0] for r in rows] == ["2026-04-01T04:30:00Z"]
+
+
 # ── Bug #1: concurrency smoke test ──────────────────────────────────────────
 
 

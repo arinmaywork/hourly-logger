@@ -222,7 +222,20 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
     or ``+00:00:00`` suffixes. Range queries normalise both sides via
     ``strftime``, but raw-string set comparisons (notably /repair) do
     not — leading to /repair flagging hundreds of already-synced rows
-    as "missing from Sheet" forever. Rewrite them once.
+    as "missing from Sheet" forever.
+
+    Two failure modes to handle:
+
+    1. **Plain UPDATE**: legacy row has no canonical-Z twin. Just rewrite
+       the suffix.
+    2. **UPDATE collides on UNIQUE(scheduled_ts)**: a canonical-Z row
+       already exists for the same instant. This happened in production
+       when /repair re-pulled rows from the Sheet AFTER Bug #11 was fixed
+       — the new insert went in with ``Z`` suffix, the original ``+00:00``
+       row stayed put, and SQLite treated them as distinct. Both rows
+       refer to the same Sheet row (same ts, both ``sheets_synced=1``),
+       so the canonical-Z row is the round-tripped-from-Sheet view and
+       the legacy row is redundant. Drop the legacy row.
 
     Idempotent: only touches rows whose suffix differs from canonical.
     """
@@ -230,6 +243,7 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
         "SELECT id, scheduled_ts, submitted_ts FROM queue"
     ).fetchall()
     fixed = 0
+    dropped = 0
     for rid, sched, sub in rows:
         new_sched = sched
         new_sub = sub
@@ -248,13 +262,23 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
                     new_sub = canon_sub
             except Exception:
                 pass
-        if new_sched != sched or new_sub != sub:
+        if new_sched == sched and new_sub == sub:
+            continue
+        try:
             conn.execute(
                 "UPDATE queue SET scheduled_ts=?, submitted_ts=? WHERE id=?",
                 (new_sched, new_sub, rid),
             )
             fixed += 1
-    log.info("v5 normalised legacy timestamps", extra={"rewritten": fixed})
+        except sqlite3.IntegrityError:
+            # The canonical-Z twin already exists. Keep it (it's the
+            # round-tripped-from-Sheet view) and drop the legacy row.
+            conn.execute("DELETE FROM queue WHERE id=?", (rid,))
+            dropped += 1
+    log.info(
+        "v5 normalised legacy timestamps",
+        extra={"rewritten": fixed, "dropped_dupes": dropped},
+    )
 
 
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
