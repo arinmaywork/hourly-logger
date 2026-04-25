@@ -51,6 +51,14 @@ T = TypeVar("T")
 
 # Cache the spreadsheet object — auth is the slow part.
 _spreadsheet: Optional[gspread.Spreadsheet] = None
+# Cache worksheet handles by name. gspread's ``spreadsheet.worksheet(name)``
+# calls ``fetch_sheet_metadata()`` on every invocation, which is a Sheets
+# API READ. With /sync churning through hundreds of rows that's the
+# single largest contributor to 429 quota errors. Worksheet IDs/titles do
+# not change inside a process lifetime, so caching the handle is safe;
+# the cache is reset alongside the spreadsheet on hard failure so a
+# transient outage doesn't pin a stale handle.
+_worksheet_cache: dict[str, gspread.Worksheet] = {}
 _cache_lock = threading.Lock()
 
 
@@ -81,13 +89,23 @@ def reset_spreadsheet_cache() -> None:
     global _spreadsheet
     with _cache_lock:
         _spreadsheet = None
+        _worksheet_cache.clear()
+        # Also drop any cached grid dates-row mapping — the new spreadsheet
+        # handle may point at a refreshed grid.
+        _grid_dates_cache["row"] = None
+        _grid_dates_cache["fetched_at"] = 0.0
 
 
 def get_worksheet(name: Optional[str] = None) -> gspread.Worksheet:
-    """Return a worksheet. Auto-creates the Log tab with header row on first use."""
+    """Return a worksheet handle, cached by name to avoid repeated metadata
+    fetches. Auto-creates the Log tab with header row on first use."""
     sheet_name = name or settings.SHEET_NAME
+    with _cache_lock:
+        cached = _worksheet_cache.get(sheet_name)
+        if cached is not None:
+            return cached
     try:
-        return get_spreadsheet().worksheet(sheet_name)
+        ws = get_spreadsheet().worksheet(sheet_name)
     except WorksheetNotFound:
         if sheet_name == settings.SHEET_NAME:
             ws = get_spreadsheet().add_worksheet(title=sheet_name, rows=5000, cols=6)
@@ -95,8 +113,32 @@ def get_worksheet(name: Optional[str] = None) -> gspread.Worksheet:
                 ["Scheduled Time", "Submitted Time", "Category", "Tag", "Note", "Lag (minutes)"],
                 value_input_option="USER_ENTERED",
             )
-            return ws
-        raise
+        else:
+            raise
+    with _cache_lock:
+        _worksheet_cache[sheet_name] = ws
+    return ws
+
+
+# Process-wide cache of the grid's "dates row" (row 2 of the Weekly tab).
+# /sync iterates many rows in the same time window — re-fetching this
+# 50-cell row per row was burning a Sheets read every single time. We cache
+# for SHEETS_GRID_DATES_TTL_S seconds; it's invalidated on cache reset and
+# on circuit-breaker failure so the next call refreshes naturally.
+_grid_dates_cache: dict[str, Any] = {"row": None, "fetched_at": 0.0}
+
+
+def _grid_dates_row(grid: gspread.Worksheet) -> list[str]:
+    """Return ``grid.row_values(2)``, cached for SHEETS_GRID_DATES_TTL_S."""
+    now = time.monotonic()
+    cached = _grid_dates_cache.get("row")
+    fetched_at = _grid_dates_cache.get("fetched_at", 0.0)
+    if cached is not None and (now - fetched_at) < settings.SHEETS_GRID_DATES_TTL_S:
+        return cached  # type: ignore[no-any-return]
+    fresh = grid.row_values(2)
+    _grid_dates_cache["row"] = fresh
+    _grid_dates_cache["fetched_at"] = now
+    return fresh
 
 
 # ── Circuit breaker ─────────────────────────────────────────────────────────
@@ -295,7 +337,9 @@ def _update_grid_sync(scheduled_ts: datetime, category: str, tag: str) -> GridUp
     def _do() -> None:
         nonlocal outcome
         grid = get_worksheet(settings.GRID_SHEET_NAME)
-        dates_row = grid.row_values(2)
+        # Cached for SHEETS_GRID_DATES_TTL_S — avoids burning a Sheets
+        # read per row during /sync of a large backlog.
+        dates_row = _grid_dates_row(grid)
         col = -1
         for i, d in enumerate(dates_row):
             if d.strip() == date_str:

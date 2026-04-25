@@ -57,6 +57,20 @@ log = get_logger(__name__)
 
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Retry failed Sheets writes.
+
+    Throttled by ``SHEETS_SYNC_DELAY_S`` (default 1.5s/row) so a large
+    backlog stays inside Google's 60 reads/min/user quota. Each row needs
+    roughly 3-4 API ops (log find/upsert + grid update + grid format),
+    so 1.5s/row puts us at ~120-160 ops/min — comfortably under the cap
+    once you account for the worksheet-handle and grid-dates caches that
+    eliminate redundant reads inside ``sheets.py``.
+
+    Bails out early if the circuit breaker opens, since hammering past
+    that point just wastes the user's wait time.
+    """
+    import asyncio
+
     if not is_owner(update):
         return
     unsynced = queue_get_unsynced()
@@ -66,10 +80,18 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     count = len(unsynced)
     suffix = "y" if count == 1 else "ies"
-    await update.message.reply_text(f"🔄 Syncing {count} unsynced entr{suffix}...")
+    delay = settings.SHEETS_SYNC_DELAY_S
+    eta_min = (count * delay) / 60
+    eta_str = f"~{eta_min:.1f} min" if eta_min >= 0.1 else "<10 sec"
+    await update.message.reply_text(
+        f"🔄 Syncing {count} unsynced entr{suffix} (≈{delay:.1f}s/row, ETA {eta_str})…"
+    )
 
     success = failed = grid_misses = 0
-    for row in unsynced:
+    last_progress = 0
+    progress_every = max(20, count // 5) if count > 50 else count + 1
+
+    for idx, row in enumerate(unsynced, start=1):
         sched_ts = parse_ts(row["scheduled_ts"])
         sub_ts = (
             parse_ts(row["submitted_ts"]) if row["submitted_ts"] else datetime.now(timezone.utc)
@@ -89,9 +111,28 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except APIError as e:
             log.error("sync APIError", extra={"queue_id": row["id"]}, exc_info=True)
             failed += 1
+            # If the breaker opened, stop early — the next rows would all
+            # bounce off the same breaker and add nothing but noise.
+            if sheets.log_tab_breaker.is_open or sheets.grid_tab_breaker.is_open:
+                await update.message.reply_text(
+                    f"⛔ Circuit breaker tripped after {idx} rows — pausing /sync.\n"
+                    f"Wait {settings.SHEETS_BREAKER_COOLDOWN_S}s and run /sync again."
+                )
+                break
         except (TimeoutError, ConnectionError) as e:
             log.error("sync network error", extra={"queue_id": row["id"], "err": str(e)})
             failed += 1
+
+        # Surface progress on long runs so the user knows we're alive.
+        if idx - last_progress >= progress_every and idx < count:
+            await update.message.reply_text(
+                f"… {idx}/{count} processed ({success} ok, {failed} failed)"
+            )
+            last_progress = idx
+
+        # Throttle between rows. Skip the sleep on the very last row.
+        if idx < count and delay > 0:
+            await asyncio.sleep(delay)
 
     parts = []
     if success:
@@ -100,7 +141,7 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parts.append(f"⚠️ {grid_misses} entries fell outside the Weekly grid range")
     if failed:
         parts.append(f"❌ {failed} still failing — check logs and try /sync again")
-    await update.message.reply_text("\n".join(parts))
+    await update.message.reply_text("\n".join(parts) or "No work performed.")
 
 
 # ── /dedup ───────────────────────────────────────────────────────────────

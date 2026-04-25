@@ -64,6 +64,26 @@ class Settings(BaseSettings):
     SHEETS_BREAKER_COOLDOWN_S: int = Field(
         60, ge=5, description="Seconds the breaker stays open before half-open retry"
     )
+    SHEETS_GRID_DATES_TTL_S: int = Field(
+        300,
+        ge=0,
+        description=(
+            "TTL (seconds) for the cached Weekly grid dates row. /sync of "
+            "a large backlog re-uses this cache to avoid burning a Sheets "
+            "read per row. 0 disables the cache."
+        ),
+    )
+    SHEETS_SYNC_DELAY_S: float = Field(
+        1.5,
+        ge=0.0,
+        le=30.0,
+        description=(
+            "Seconds to sleep between rows in /sync. Each row needs ~3-4 "
+            "Sheets API ops; with the default 60 reads/min user quota this "
+            "throttle keeps a multi-hundred-row sync inside the budget. "
+            "Lower it for paid quotas, raise it if you keep hitting 429s."
+        ),
+    )
 
     # ── Color matching ─────────────────────────────────────────────────────
     COLOR_MATCH_THRESHOLD: float = Field(
