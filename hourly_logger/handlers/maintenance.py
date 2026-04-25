@@ -380,6 +380,99 @@ async def cmd_fixcats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(result, parse_mode="Markdown")
 
 
+# ── /uncat ───────────────────────────────────────────────────────────────
+#
+# /trend silently drops any Sheet row whose Category cell isn't *exactly*
+# in CATEGORY_ORDER (e.g. typo, stray space, different emoji variant, an
+# old name like "Creative" without the prefix). /fixcats only handles the
+# blank-cell case. /uncat surfaces the actual offending values so the user
+# can decide whether to repair from Telegram or fix in the Sheet directly.
+
+
+def _uncat_sync(prefix: Optional[str]) -> str:
+    sheet = sheets.get_worksheet(settings.SHEET_NAME)
+    all_rows = sheet.get_all_values()
+
+    valid = set(CATEGORIES.keys())
+    offenders: list[tuple[int, str, str]] = []  # (sheet_row, scheduled_ts, raw_cat)
+    bad_values: Counter[str] = Counter()
+
+    for i, r in enumerate(all_rows[1:], start=2):
+        sched = r[0].strip() if len(r) > 0 else ""
+        if not sched:
+            continue
+        if prefix and not sched.startswith(prefix):
+            continue
+        cat = r[2].strip() if len(r) > 2 else ""
+        if cat in valid:
+            continue
+        # Skip blank rows — those belong to /fixcats territory.
+        if not cat:
+            continue
+        offenders.append((i, sched, cat))
+        bad_values[cat] += 1
+
+    scope = f"in {prefix}" if prefix else "across all rows"
+    if not offenders:
+        return (
+            f"✅ No non-canonical category values {scope}.\n"
+            "_(Blank cells are handled by /fixcats.)_"
+        )
+
+    lines = [
+        f"⚠️ *{len(offenders)} row(s) with unrecognised categories {scope}*",
+        "",
+        "*Bad values seen:*",
+    ]
+    for value, count in bad_values.most_common():
+        lines.append(f"• `{value}` × {count}")
+
+    lines.append("")
+    lines.append("*First 15 offenders (Sheet row → timestamp → bad category):*")
+    for sheet_row, sched, cat in offenders[:15]:
+        lines.append(f"• row {sheet_row}: `{sched}` → `{cat}`")
+    if len(offenders) > 15:
+        lines.append(f"_…and {len(offenders) - 15} more._")
+
+    lines.append("")
+    lines.append(
+        "_Fix options: edit the Category cell directly in the Sheet, "
+        "then run /repair so the local DB picks up the change._"
+    )
+    return "\n".join(lines)
+
+
+async def cmd_uncat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update):
+        return
+    arg = " ".join(context.args).strip() if context.args else ""
+    prefix: Optional[str] = None
+    if arg:
+        # Accept YYYY, YYYY-MM, or YYYY-MM-DD as a timestamp prefix.
+        if not (len(arg) in (4, 7, 10) and all(c.isdigit() or c == "-" for c in arg)):
+            await update.message.reply_text(
+                "⚠️ Usage: `/uncat [YYYY | YYYY-MM | YYYY-MM-DD]`",
+                parse_mode="Markdown",
+            )
+            return
+        prefix = arg
+    await update.message.reply_text(
+        f"⏳ Scanning Log tab for unrecognised categories"
+        f"{f' in {prefix}' if prefix else ''}…"
+    )
+    import asyncio
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _uncat_sync, prefix)
+    except APIError as exc:
+        log.exception("uncat APIError")
+        result = f"❌ Sheets API error during uncat — check logs ({exc})."
+    except Exception:
+        log.exception("uncat failed")
+        result = "❌ Error during uncat — check logs."
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
 # ── /auditlog ────────────────────────────────────────────────────────────
 
 

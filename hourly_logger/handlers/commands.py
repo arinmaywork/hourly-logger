@@ -48,6 +48,8 @@ HELP_TEXT = (
     "   _pulls Sheet-only rows into DB; re-flags DB rows missing from Sheet_\n"
     "• /dedup — remove duplicate-timestamp rows from the Log tab\n"
     "• /fixcats — re-derive blank categories from the Weekly grid colour\n"
+    "• /uncat `[YYYY | YYYY-MM | YYYY-MM-DD]` — list rows whose category\n"
+    "   isn't in the canonical set _(non-blank typos /fixcats can't catch)_\n"
     "• /auditlog `[YYYY-MM]` — health audit of the Log tab for a month\n\n"
     "*Misc*\n"
     "• /start — welcome message\n"

@@ -34,6 +34,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("sync",     maintenance.cmd_sync))
     app.add_handler(CommandHandler("repair",   maintenance.cmd_repair))
     app.add_handler(CommandHandler("fixcats",  maintenance.cmd_fixcats))
+    app.add_handler(CommandHandler("uncat",    maintenance.cmd_uncat))
     app.add_handler(CommandHandler("dedup",    maintenance.cmd_dedup))
     app.add_handler(CommandHandler("auditlog", maintenance.cmd_auditlog))
     # /migrate retained as a function but intentionally not registered.
