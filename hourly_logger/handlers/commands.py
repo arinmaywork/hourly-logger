@@ -1,4 +1,4 @@
-"""Basic owner-facing commands: /start, /skip, /skipall, /cancel."""
+"""Basic owner-facing commands: /start, /help, /skip, /skipall, /cancel."""
 
 from __future__ import annotations
 
@@ -21,6 +21,46 @@ from ._common import is_owner
 log = get_logger(__name__)
 
 
+HELP_TEXT = (
+    "📖 *Hourly Logger — Commands*\n\n"
+    "*Logging entries*\n"
+    "• /log `<cat> <tag> [,, note]` — instant one-line entry\n"
+    "   _e.g._ `/log c Deep Work,, refactored the bot`\n"
+    "• Reply to a prompt — guided 2-step (category → `Tag,, Note`)\n"
+    "• /skip — skip the current prompt\n"
+    "• /skipall — skip every pending entry from before today's log-day\n"
+    "• /cancel — abandon the current flow without skipping\n\n"
+    "*Reports*\n"
+    "• /status — queue + this week + this year breakdown\n"
+    "• /weekly `[date]` — week containing date (default: this week)\n"
+    "   _accepts_ `YYYY-MM-DD`, `DD/MM`, `today`, `yesterday`\n"
+    "• /monthly `[YYYY-MM | MM]` — month breakdown (default: this month)\n"
+    "• /trend `monthly [YYYY]` — monthly totals across a year\n"
+    "• /trend `weekly [YYYY-MM]` — weekly totals across a month\n\n"
+    "*Editing & recovery*\n"
+    "• /edit `[N|date]` — pick from N recent entries to fix\n"
+    "   _default 5, max 50; date forms same as /weekly_\n"
+    "• /missing `[hours]` — list unfilled (pending/skipped) hours so you can\n"
+    "   fill them in from Telegram _(default 48h, max 336h)_\n\n"
+    "*Sheets sync & repair*\n"
+    "• /sync — retry failed Google Sheets writes\n"
+    "• /repair — reconcile local DB ↔ Log tab in both directions\n"
+    "   _pulls Sheet-only rows into DB; re-flags DB rows missing from Sheet_\n"
+    "• /dedup — remove duplicate-timestamp rows from the Log tab\n"
+    "• /fixcats — re-derive blank categories from the Weekly grid colour\n"
+    "• /auditlog `[YYYY-MM]` — health audit of the Log tab for a month\n\n"
+    "*Misc*\n"
+    "• /start — welcome message\n"
+    "• /help — this list"
+)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update):
+        return
+    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_owner(update):
         return
@@ -30,15 +70,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "*Entry modes:*\n"
         "• *Guided* — tap category, then type `Tag,, Note` _(2 steps)_\n"
         "• *Quick* — `/log c Deep Work,, note` _(1 message, no prompts)_\n\n"
-        "*Commands:*\n"
-        "• /log `<cat> <tag> [,, note]` — instant one-line entry\n"
-        "• /status — queue stats\n"
-        "• /edit `[N|YYYY-MM-DD]` — edit recent entries (default 5)\n"
-        "• /missing `[hours]` — fill in unfilled hours (default 48h)\n"
-        "• /skip — skip current prompt\n"
-        "• /cancel — abandon flow without skipping\n"
-        "• /sync — retry failed Sheets writes\n"
-        "• /repair — reconcile local DB with Log tab",
+        "Send /help for the full command reference.",
         parse_mode="Markdown",
     )
 

@@ -20,6 +20,7 @@ from . import commands, edit, flow, log, maintenance, reports
 def register_handlers(app: Application) -> None:
     """Wire all command + message handlers onto the Application."""
     app.add_handler(CommandHandler("start",    commands.cmd_start))
+    app.add_handler(CommandHandler("help",     commands.cmd_help))
     app.add_handler(CommandHandler("log",      log.cmd_log))
     app.add_handler(CommandHandler("skip",     commands.cmd_skip))
     app.add_handler(CommandHandler("skipall",  commands.cmd_skipall))
