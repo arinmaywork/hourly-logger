@@ -247,25 +247,40 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"⏳ Loading trend data for {len(periods)} periods…")
     entries = await sheets.log_raw(periods[0][1], periods[-1][2])
 
-    def count_period(since: datetime, until: datetime) -> dict[str, int]:
+    def count_period(since: datetime, until: datetime) -> tuple[dict[str, int], int]:
+        """Return (per-category counts, uncategorised count). Rows whose
+        category is blank or doesn't match CATEGORY_ORDER are surfaced as
+        'uncategorised' so the period total matches /auditlog instead of
+        silently swallowing the discrepancy (see /trend → 743 vs Sheet 744)."""
         counts: dict[str, int] = {}
+        uncat = 0
         for sched_dt, cat in entries:
-            if since <= sched_dt <= until and cat in CATEGORY_ORDER:
+            if not (since <= sched_dt <= until):
+                continue
+            if cat in CATEGORY_ORDER:
                 counts[cat] = counts.get(cat, 0) + 1
-        return counts
+            else:
+                uncat += 1
+        return counts, uncat
 
     lines = [title, ""]
+    any_uncat = False
     for label, since, until, is_current in periods:
-        counts = count_period(since, until)
-        total = sum(counts.values())
+        counts, uncat = count_period(since, until)
+        total = sum(counts.values()) + uncat
         if total == 0:
             continue
         marker = "✦" if is_current else " "
         cat_parts = " ".join(f"{cat_icon[c]}{counts.get(c, 0)}" for c in CATEGORY_ORDER)
+        if uncat:
+            cat_parts += f" ⚠️{uncat}"
+            any_uncat = True
         lines.append(f"`{marker}{label:<14}` {cat_parts}  *{total}h*")
 
     lines += [
         "",
         "_" + " · ".join(f"{cat_icon[c]} {c.split()[-1]}" for c in CATEGORY_ORDER) + "_",
     ]
+    if any_uncat:
+        lines.append("_⚠️ = uncategorised rows in the Sheet — try /fixcats_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
