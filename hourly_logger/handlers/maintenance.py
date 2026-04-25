@@ -17,6 +17,7 @@ Notable fixes
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import time
 from collections import Counter
@@ -377,6 +378,96 @@ async def cmd_fixcats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:
         log.exception("fixcats failed")
         result = "❌ Error during fixcats — check logs."
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
+# ── /gaps ────────────────────────────────────────────────────────────────
+#
+# /trend totals can disagree with /auditlog when the Sheet is missing a
+# row for a specific hour (bot was down, skipped slot never refilled,
+# etc.). /gaps walks the Sheet for a given period and lists every hourly
+# slot that has no row, so the user can backfill from /missing or /log.
+
+
+def _gaps_sync(year: int, month: int) -> str:
+    sheet = sheets.get_worksheet(settings.SHEET_NAME)
+    all_rows = sheet.get_all_values()
+
+    prefix = f"{year:04d}-{month:02d}"
+    have: set[str] = set()
+    for r in all_rows[1:]:
+        sched = r[0].strip() if r and len(r) > 0 else ""
+        if not sched or not sched.startswith(prefix):
+            continue
+        # Normalise to 'YYYY-MM-DD HH:00' so two minute-variants of the
+        # same hour collapse.
+        if len(sched) >= 13:
+            have.add(sched[:13] + ":00")
+
+    last_day = calendar.monthrange(year, month)[1]
+    today_local = datetime.now(settings.tz).date()
+    if today_local.year == year and today_local.month == month:
+        last_day = today_local.day
+
+    expected: list[str] = []
+    for day in range(1, last_day + 1):
+        for hour in range(24):
+            expected.append(f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:00")
+
+    missing = [ts for ts in expected if ts not in have]
+    expected_count = len(expected)
+    have_count = len([ts for ts in expected if ts in have])
+
+    lines = [
+        f"🕳️ *Gap audit: {prefix}*",
+        f"Hours covered: {have_count}/{expected_count}",
+    ]
+    if not missing:
+        lines.append("✅ No missing hourly slots.")
+        return "\n".join(lines)
+
+    lines.append(f"❌ {len(missing)} missing slot(s).")
+    lines.append("")
+    lines.append("*First 30 gaps:*")
+    for ts in missing[:30]:
+        lines.append(f"• `{ts}`")
+    if len(missing) > 30:
+        lines.append(f"_…and {len(missing) - 30} more._")
+    lines.append("")
+    lines.append(
+        "_Recover via /missing (if the bot recorded the slot as "
+        "pending/skipped) or by adding the row manually in the Sheet "
+        "then running /repair._"
+    )
+    return "\n".join(lines)
+
+
+async def cmd_gaps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update):
+        return
+    arg = " ".join(context.args).strip() if context.args else ""
+    from ..dates import parse_user_month
+    parsed = parse_user_month(arg, settings.tz)
+    if parsed is None:
+        await update.message.reply_text(
+            "⚠️ Usage: `/gaps [YYYY-MM | MM]` (default: this month)",
+            parse_mode="Markdown",
+        )
+        return
+    year, month = parsed
+    await update.message.reply_text(
+        f"⏳ Scanning Log tab for missing hours in {year:04d}-{month:02d}…"
+    )
+    import asyncio
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, _gaps_sync, year, month)
+    except APIError as exc:
+        log.exception("gaps APIError")
+        result = f"❌ Sheets API error during gaps — check logs ({exc})."
+    except Exception:
+        log.exception("gaps failed")
+        result = "❌ Error during gaps — check logs."
     await update.message.reply_text(result, parse_mode="Markdown")
 
 
