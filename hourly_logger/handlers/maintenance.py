@@ -389,37 +389,72 @@ async def cmd_fixcats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # slot that has no row, so the user can backfill from /missing or /log.
 
 
+def _parse_sched_ymdh(s: str) -> tuple[int, int, int, int] | None:
+    """Parse a Sheet 'Scheduled Time' cell into (year, month, day, hour).
+
+    Bug: Sheets cells are written via ``USER_ENTERED`` so values are
+    auto-coerced to datetimes and re-displayed using the column's number
+    format. If column A is formatted ``YYYY-MM-DD H:MM`` (single-digit
+    hour) instead of ``YYYY-MM-DD HH:MM``, hours 0-9 come back without
+    leading zeros and the prior ``sched[:13] + ':00'`` slicer produced
+    nonsense like ``'2026-03-01 9::00'`` — flagging every 0-9am row as
+    missing. Parsing into integer components sidesteps the formatting.
+    Returns None if the string can't be understood (header rows, blanks).
+    """
+    s = s.strip()
+    if not s:
+        return None
+    # Split date/time on either ' ' or 'T' (ISO style).
+    sep_idx = -1
+    for sep in (" ", "T"):
+        i = s.find(sep)
+        if i != -1:
+            sep_idx = i
+            break
+    if sep_idx == -1:
+        return None
+    date_part = s[:sep_idx]
+    time_part = s[sep_idx + 1 :]
+    try:
+        y_s, m_s, d_s = date_part.split("-")
+        h_s = time_part.split(":")[0]
+        return int(y_s), int(m_s), int(d_s), int(h_s)
+    except (ValueError, IndexError):
+        return None
+
+
 def _gaps_sync(year: int, month: int) -> str:
     sheet = sheets.get_worksheet(settings.SHEET_NAME)
     all_rows = sheet.get_all_values()
 
-    prefix = f"{year:04d}-{month:02d}"
-    have: set[str] = set()
+    have: set[tuple[int, int, int, int]] = set()
     for r in all_rows[1:]:
         sched = r[0].strip() if r and len(r) > 0 else ""
-        if not sched or not sched.startswith(prefix):
+        parsed = _parse_sched_ymdh(sched)
+        if not parsed:
             continue
-        # Normalise to 'YYYY-MM-DD HH:00' so two minute-variants of the
-        # same hour collapse.
-        if len(sched) >= 13:
-            have.add(sched[:13] + ":00")
+        py, pm, _pd, _ph = parsed
+        if py != year or pm != month:
+            continue
+        have.add(parsed)
 
     last_day = calendar.monthrange(year, month)[1]
     today_local = datetime.now(settings.tz).date()
     if today_local.year == year and today_local.month == month:
         last_day = today_local.day
 
-    expected: list[str] = []
+    expected: list[tuple[int, int, int, int]] = []
     for day in range(1, last_day + 1):
         for hour in range(24):
-            expected.append(f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:00")
+            expected.append((year, month, day, hour))
 
-    missing = [ts for ts in expected if ts not in have]
+    missing = [t for t in expected if t not in have]
     expected_count = len(expected)
-    have_count = len([ts for ts in expected if ts in have])
+    have_count = expected_count - len(missing)
 
+    period_label = f"{year:04d}-{month:02d}"
     lines = [
-        f"🕳️ *Gap audit: {prefix}*",
+        f"🕳️ *Gap audit: {period_label}*",
         f"Hours covered: {have_count}/{expected_count}",
     ]
     if not missing:
@@ -429,8 +464,8 @@ def _gaps_sync(year: int, month: int) -> str:
     lines.append(f"❌ {len(missing)} missing slot(s).")
     lines.append("")
     lines.append("*First 30 gaps:*")
-    for ts in missing[:30]:
-        lines.append(f"• `{ts}`")
+    for y, m, d, h in missing[:30]:
+        lines.append(f"• `{y:04d}-{m:02d}-{d:02d} {h:02d}:00`")
     if len(missing) > 30:
         lines.append(f"_…and {len(missing) - 30} more._")
     lines.append("")
