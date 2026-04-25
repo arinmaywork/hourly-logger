@@ -816,13 +816,24 @@ def _repair_sync() -> str:
         else:
             sheet_by_ts[canon] = r
 
+    # Bug: previous comparisons used the RAW DB scheduled_ts string
+    # ("2026-04-01T04:30:00+00:00" for legacy rows pre-Bug-#11) against
+    # canonical_ts() output ("2026-04-01T04:30:00Z"). Identical instant,
+    # different string → /repair flagged 408 already-synced legacy rows
+    # as "missing from Sheet". /sync's parse-based upsert correctly
+    # found and overwrote them, so /trend never changed but every cycle
+    # burned a 10-minute round trip on Sheets quota. Normalise via
+    # canonical_ts(parse_ts(...)) so all comparisons are apples-to-apples.
+    db_canon: set[str] = {
+        canonical_ts(parse_ts(s)) for s in queue_get_all_scheduled_ts()
+    }
+
     # Sheet → DB: pull in rows the DB doesn't know about.
-    db_ts = queue_get_all_scheduled_ts()
     pulled = 0
-    for canon_ts, r in sheet_by_ts.items():
-        if canon_ts in db_ts:
+    for canon_ts_str, r in sheet_by_ts.items():
+        if canon_ts_str in db_canon:
             continue
-        sched_utc = parse_ts(canon_ts)
+        sched_utc = parse_ts(canon_ts_str)
         sub_utc = _parse_sheet_local_ts(r[1] if len(r) > 1 else "") or sched_utc
         category = (r[2].strip() if len(r) > 2 else "") or "⚪️ Other"
         tag = r[3].strip() if len(r) > 3 else ""
@@ -845,7 +856,8 @@ def _repair_sync() -> str:
         latest = max(parse_ts(t) for t in sheet_by_ts.keys())
         # Re-fetch DB rows AFTER the pull above so we see the new ones too.
         for row in queue_get_done_in_window(earliest, latest):
-            if row["scheduled_ts"] not in sheet_by_ts and row["sheets_synced"]:
+            row_canon = canonical_ts(parse_ts(row["scheduled_ts"]))
+            if row_canon not in sheet_by_ts and row["sheets_synced"]:
                 from ..database import queue_mark_unsynced_sync
                 queue_mark_unsynced_sync(row["id"])
                 flagged += 1

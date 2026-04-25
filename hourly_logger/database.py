@@ -214,11 +214,55 @@ def _migration_v4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE queue ADD COLUMN sync_attempts INTEGER NOT NULL DEFAULT 0")
 
 
+def _migration_v5(conn: sqlite3.Connection) -> None:
+    """Normalise legacy scheduled_ts ``+00:00`` suffixes to canonical ``Z``.
+
+    Bug #11 fixed canonical_ts() to always emit ``...Z`` going forward,
+    but legacy rows written before that change still carry ``+00:00``
+    or ``+00:00:00`` suffixes. Range queries normalise both sides via
+    ``strftime``, but raw-string set comparisons (notably /repair) do
+    not — leading to /repair flagging hundreds of already-synced rows
+    as "missing from Sheet" forever. Rewrite them once.
+
+    Idempotent: only touches rows whose suffix differs from canonical.
+    """
+    rows = conn.execute(
+        "SELECT id, scheduled_ts, submitted_ts FROM queue"
+    ).fetchall()
+    fixed = 0
+    for rid, sched, sub in rows:
+        new_sched = sched
+        new_sub = sub
+        # Reuse parse_ts/canonical_ts for both columns. Skip rows whose
+        # suffix already matches to keep the migration cheap on re-runs.
+        try:
+            canon_sched = canonical_ts(parse_ts(sched))
+            if canon_sched != sched:
+                new_sched = canon_sched
+        except Exception:
+            pass
+        if sub:
+            try:
+                canon_sub = canonical_ts(parse_ts(sub))
+                if canon_sub != sub:
+                    new_sub = canon_sub
+            except Exception:
+                pass
+        if new_sched != sched or new_sub != sub:
+            conn.execute(
+                "UPDATE queue SET scheduled_ts=?, submitted_ts=? WHERE id=?",
+                (new_sched, new_sub, rid),
+            )
+            fixed += 1
+    log.info("v5 normalised legacy timestamps", extra={"rewritten": fixed})
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_v1),
     (2, _migration_v2),
     (3, _migration_v3),
     (4, _migration_v4),
+    (5, _migration_v5),
 ]
 
 
