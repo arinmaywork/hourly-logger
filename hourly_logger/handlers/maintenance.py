@@ -794,14 +794,27 @@ def _repair_sync() -> str:
     sheet_rows = log_ws.get_all_values()
 
     # Index Sheet by canonical UTC timestamp.
+    #
+    # Bug: previous implementation used a plain dict assignment
+    # (`sheet_by_ts[ts] = r`) which silently OVERWROTE duplicates. So
+    # /repair would happily report "DB and Log tab are in agreement"
+    # while the Sheet contained hundreds of phantom rows produced by
+    # the /sync upsert bug (see _find_log_row_by_sched). Count
+    # duplicates separately so /repair surfaces the corruption to the
+    # user — and recommend /dedup as the fix.
     sheet_by_ts: dict[str, list[str]] = {}
+    sheet_dupes: dict[str, int] = {}
     for r in sheet_rows[1:]:
         if not r or len(r) < 1:
             continue
         sched_utc = _parse_sheet_local_ts(r[0])
         if sched_utc is None:
             continue
-        sheet_by_ts[canonical_ts(sched_utc)] = r
+        canon = canonical_ts(sched_utc)
+        if canon in sheet_by_ts:
+            sheet_dupes[canon] = sheet_dupes.get(canon, 1) + 1
+        else:
+            sheet_by_ts[canon] = r
 
     # Sheet → DB: pull in rows the DB doesn't know about.
     db_ts = queue_get_all_scheduled_ts()
@@ -845,7 +858,14 @@ def _repair_sync() -> str:
         f"🔄 Flagged *{flagged}* DB entr{'y' if flagged == 1 else 'ies'} for re-sync "
         f"(missing from Log tab — run /sync to push)."
     )
-    if pulled == 0 and flagged == 0:
+    if sheet_dupes:
+        # Total extra rows beyond the canonical one for each duplicated ts.
+        extra = sum(c - 1 for c in sheet_dupes.values())
+        parts.append(
+            f"⚠️ *{extra}* duplicate row(s) across "
+            f"*{len(sheet_dupes)}* timestamp(s) in the Log tab — run /dedup to clean up."
+        )
+    if pulled == 0 and flagged == 0 and not sheet_dupes:
         return "✅ DB and Log tab are in agreement — nothing to repair."
     return "\n".join(parts)
 

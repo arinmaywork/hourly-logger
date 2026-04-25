@@ -282,6 +282,38 @@ def _with_retry(
 # ── Sync writers ────────────────────────────────────────────────────────────
 
 
+def _find_log_row_by_sched(
+    sheet: gspread.Worksheet, scheduled_ts: datetime,
+) -> int | None:
+    """Return the 1-indexed Sheet row for ``scheduled_ts``, or ``None``.
+
+    DO NOT use ``sheet.find(sched_str, in_column=1)`` here. ``find`` does
+    an exact-string match against the cell's *displayed* value; if the
+    column's number format is ``YYYY-MM-DD H:MM`` (single-digit hour),
+    Sheets re-renders our zero-padded ``"2026-04-01 04:00"`` write as
+    ``"2026-04-01 4:00"`` on read-back. ``find`` then returns ``None``,
+    the caller falls through to ``append_row``, and every re-sync
+    silently creates a duplicate. (Discovered when /trend reported
+    April = 1208h vs ~600 physically possible — ~600 phantom rows from
+    accumulated /sync runs.)
+
+    Reading column A and parsing each cell into a tz-aware datetime
+    sidesteps the formatting entirely. One ``col_values`` call costs the
+    same as one ``find`` call against the API quota.
+    """
+    target_local = scheduled_ts.astimezone(settings.tz).replace(
+        second=0, microsecond=0,
+    )
+    col_a = sheet.col_values(1)  # 1-indexed list, header at index 0
+    for i, cell in enumerate(col_a[1:], start=2):
+        parsed = _parse_sheet_sched(cell, settings.tz)
+        if parsed is None:
+            continue
+        if parsed.replace(second=0, microsecond=0) == target_local:
+            return i
+    return None
+
+
 def _save_log_row_sync(
     scheduled_ts: datetime,
     submitted_ts: datetime,
@@ -297,15 +329,16 @@ def _save_log_row_sync(
 
     def _do() -> None:
         sheet = get_worksheet()
-        # Upsert by scheduled timestamp.
-        cell = sheet.find(sched_str, in_column=1) if is_edit else sheet.find(sched_str, in_column=1)
-        if cell:
+        # Parse-based upsert — see _find_log_row_by_sched for the
+        # single-digit-hour duplicate-row footgun this avoids.
+        target_row = _find_log_row_by_sched(sheet, scheduled_ts)
+        if target_row:
             sheet.update(
-                f"A{cell.row}:F{cell.row}",
+                f"A{target_row}:F{target_row}",
                 [row],
                 value_input_option="USER_ENTERED",
             )
-            log.info("log row upserted", extra={"sheet_row": cell.row, "sched": sched_str})
+            log.info("log row upserted", extra={"sheet_row": target_row, "sched": sched_str})
             return
         sheet.append_row(row, value_input_option="USER_ENTERED")
         log.info("log row appended", extra={"sched": sched_str})
