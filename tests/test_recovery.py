@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from hourly_logger.database import (
     canonical_ts,
     db_init,
+    db_connect,
     queue_add_prompt_sync,
     queue_get_all_scheduled_ts,
     queue_get_done_in_window,
@@ -21,6 +22,7 @@ from hourly_logger.database import (
     queue_mark_done_sync,
     queue_mark_skipped_sync,
     queue_mark_unsynced_sync,
+    queue_materialize_window_sync,
 )
 
 
@@ -72,6 +74,92 @@ def test_unfilled_window_respects_bounds(tmp_db_path: str) -> None:
     )
     assert len(rows) == 1
     assert rows[0]["scheduled_ts"] == canonical_ts(inside)
+
+
+# ── Ghost-gap materialisation (the /missing fix) ───────────────────────────
+
+
+def test_materialize_window_inserts_only_missing_hours(tmp_db_path: str) -> None:
+    """Walk a window and insert pending placeholders for every hour that
+    has no row yet — leaving existing rows (any status) untouched.
+
+    Reproduces the user-visible bug: APScheduler dropped a tick at
+    2026-04-27 14:00 UTC, so no row existed for that hour. /missing
+    couldn't see it (status-driven query). After materialisation the
+    ghost hour appears as pending and /missing surfaces it.
+    """
+    db_init()
+    base = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+    # Seed only 12, 13, 15, 16 — leaving 14:00 as a ghost gap.
+    for h in (0, 1, 3, 4):
+        queue_add_prompt_sync(base + timedelta(hours=h))
+    # Mark 13 done so we can prove materialise doesn't disturb it.
+    rows = queue_get_unfilled_window(base, base + timedelta(hours=4))
+    done_id = next(
+        r["id"] for r in rows
+        if r["scheduled_ts"] == canonical_ts(base + timedelta(hours=1))
+    )
+    queue_mark_done_sync(
+        done_id, "🟢 Creative", "Tag", "", base + timedelta(hours=1, minutes=10), False,
+    )
+
+    inserted = queue_materialize_window_sync(base, base + timedelta(hours=4))
+    assert inserted == 1  # only the 14:00 ghost gap
+
+    # All 5 hours now exist; the ghost is pending; the done row is still done.
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT scheduled_ts, status FROM queue ORDER BY scheduled_ts"
+        ).fetchall()
+    assert [r[0] for r in rows] == [
+        canonical_ts(base + timedelta(hours=h)) for h in range(5)
+    ]
+    by_ts = {r[0]: r[1] for r in rows}
+    assert by_ts[canonical_ts(base + timedelta(hours=1))] == "done"
+    assert by_ts[canonical_ts(base + timedelta(hours=2))] == "pending"  # the ghost
+
+
+def test_materialize_window_is_idempotent(tmp_db_path: str) -> None:
+    """A second call inserts zero rows — UNIQUE INDEX guards re-runs."""
+    db_init()
+    base = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+
+    first = queue_materialize_window_sync(base, base + timedelta(hours=2))
+    assert first == 3  # 12, 13, 14
+    second = queue_materialize_window_sync(base, base + timedelta(hours=2))
+    assert second == 0
+
+
+def test_materialize_window_snaps_partial_bounds(tmp_db_path: str) -> None:
+    """Start with a non-zero minute → snap *up* to next top-of-hour.
+    End with a non-zero minute → snap *down* (don't fabricate future).
+
+    Catches a regression where /missing on Tue 28 Apr 09:43 IST
+    (= 04:13 UTC) might otherwise insert a phantom 04:00 UTC row even
+    though that hour hasn't fully elapsed in the user's experience.
+    """
+    db_init()
+    # Window: 04:13 → 06:47 UTC.
+    start = datetime(2026, 4, 28, 4, 13, tzinfo=timezone.utc)
+    end = datetime(2026, 4, 28, 6, 47, tzinfo=timezone.utc)
+    inserted = queue_materialize_window_sync(start, end)
+    # Expect 05:00 and 06:00 only (start snapped up to 05:00, end snapped down to 06:00).
+    assert inserted == 2
+    with db_connect() as conn:
+        rows = [r[0] for r in conn.execute(
+            "SELECT scheduled_ts FROM queue ORDER BY scheduled_ts"
+        )]
+    assert rows == [
+        canonical_ts(datetime(2026, 4, 28, 5, 0, tzinfo=timezone.utc)),
+        canonical_ts(datetime(2026, 4, 28, 6, 0, tzinfo=timezone.utc)),
+    ]
+
+
+def test_materialize_window_empty_when_start_after_end(tmp_db_path: str) -> None:
+    """Bounds in the wrong order are a no-op, not a crash."""
+    db_init()
+    base = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+    assert queue_materialize_window_sync(base + timedelta(hours=2), base) == 0
 
 
 # ── /repair backing helpers ─────────────────────────────────────────────────

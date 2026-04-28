@@ -416,6 +416,67 @@ def queue_get_unfilled_window(
         ).fetchall()
 
 
+def queue_materialize_window_sync(
+    start_utc: datetime, end_utc: datetime
+) -> int:
+    """Insert a pending placeholder for every top-of-hour in ``[start, end]``
+    that has no row yet. Returns the number of rows actually inserted.
+
+    ``backfill_missed_prompts`` only walks forward from ``MAX(scheduled_ts)``,
+    so any *ghost* hour the bot was offline for *before* its current MAX
+    stays invisible to ``/missing`` (which is status-driven and can only
+    see rows that exist). This helper closes that hole — calling it from
+    ``cmd_missing`` makes /missing report the calendar truth, not just the
+    DB truth.
+
+    Bounds are snapped: ``start`` rounds *up* to the next top-of-hour
+    (so a partial first hour isn't inserted as a phantom prompt) and
+    ``end`` rounds *down* (don't materialise a future hour the user
+    can't yet have logged). Both safe — UNIQUE INDEX makes inserts
+    idempotent regardless.
+    """
+    # Snap start up, end down, both to top-of-UTC-hour.
+    if start_utc.minute or start_utc.second or start_utc.microsecond:
+        start_utc = (start_utc + dt.timedelta(hours=1)).replace(
+            minute=0, second=0, microsecond=0
+        )
+    end_utc = end_utc.replace(minute=0, second=0, microsecond=0)
+
+    if start_utc > end_utc:
+        return 0
+
+    inserted = 0
+    current = start_utc
+    with db_connect() as conn:
+        while current <= end_utc:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO queue (scheduled_ts) VALUES (?)",
+                (canonical_ts(current),),
+            )
+            inserted += cur.rowcount
+            current += dt.timedelta(hours=1)
+    if inserted:
+        log.info(
+            "materialised ghost gaps",
+            extra={
+                "count": inserted,
+                "start": canonical_ts(start_utc),
+                "end": canonical_ts(end_utc),
+            },
+        )
+    return inserted
+
+
+async def queue_materialize_window(
+    start_utc: datetime, end_utc: datetime
+) -> int:
+    async with _write_lock:
+        return cast(
+            int,
+            await _run_blocking(queue_materialize_window_sync, start_utc, end_utc),
+        )
+
+
 def queue_get_done_in_window(
     start_utc: datetime, end_utc: datetime
 ) -> list[sqlite3.Row]:

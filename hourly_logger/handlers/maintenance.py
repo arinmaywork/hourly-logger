@@ -45,6 +45,7 @@ from ..database import (
     queue_insert_done_row,
     queue_mark_sheets_synced,
     queue_mark_unsynced,
+    queue_materialize_window,
 )
 from ..logger import get_logger
 from ..state import STAGE_EDIT_SELECTION, session
@@ -718,20 +719,31 @@ async def cmd_missing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     now = datetime.now(timezone.utc)
     start = now - dt.timedelta(hours=hours)
+
+    # Materialise any *ghost* hours in the window first — slots where the
+    # bot was offline at top-of-hour and never inserted a row, so they
+    # were invisible to the status-driven query below. INSERT OR IGNORE,
+    # so already-present hours (done/pending/skipped) are untouched.
+    materialised = await queue_materialize_window(start, now)
     rows = queue_get_unfilled_window(start, now)
 
     if not rows:
         await update.message.reply_text(
-            f"✅ No unfilled hours in the last {hours}h.\n"
-            "_Note: this only sees hours the bot recorded — if it was "
-            "offline at the top of an hour, that slot won't appear. "
-            "Use /repair to pull in Sheet-only entries._",
+            f"✅ No unfilled hours in the last {hours}h.",
             parse_mode="Markdown",
         )
         return
 
+    ghost_note = ""
+    if materialised:
+        suffix = "" if materialised == 1 else "s"
+        ghost_note = (
+            f"_(also surfaced *{materialised}* ghost hour{suffix} the bot "
+            "was offline for — no row existed before)_\n"
+        )
     msg = (
         f"⛳ *Unfilled hours in the last {hours}h:*\n"
+        f"{ghost_note}"
         f"_(Use /cancel to abandon)_\n\n"
     )
     keyboard: list[list[str]] = []
