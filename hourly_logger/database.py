@@ -379,6 +379,23 @@ def queue_get_by_id(row_id: int) -> Optional[sqlite3.Row]:
         return cast(Optional[sqlite3.Row], row)
 
 
+def queue_get_by_scheduled_ts(scheduled_ts: datetime) -> Optional[sqlite3.Row]:
+    """Return the queue row whose scheduled_ts matches, or ``None``.
+
+    Used by the explicit-timestamp form of ``/log`` to detect whether
+    the slot already exists (pending → mark done; done → reject; missing
+    → insert placeholder then mark done). Comparison is on the canonical
+    string form so legacy ``+00:00`` rows don't sneak through — though
+    after migration v5 those are all rewritten to ``Z`` anyway.
+    """
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM queue WHERE scheduled_ts=?",
+            (canonical_ts(scheduled_ts),),
+        ).fetchone()
+        return cast(Optional[sqlite3.Row], row)
+
+
 def queue_get_unfilled_window(
     start_utc: datetime, end_utc: datetime
 ) -> list[sqlite3.Row]:

@@ -26,6 +26,8 @@ HELP_TEXT = (
     "*Logging entries*\n"
     "• /log `<cat> <tag> [,, note]` — instant one-line entry\n"
     "   _e.g._ `/log c Deep Work,, refactored the bot`\n"
+    "• /log `<YYYY-MM-DD> <HH:MM> <cat> <tag> [,, note]` — backfill a\n"
+    "   specific historical hour (use for /gaps slots; bot was offline)\n"
     "• Reply to a prompt — guided 2-step (category → `Tag,, Note`)\n"
     "• /skip — skip the current prompt\n"
     "• /skipall — skip every pending entry from before today's log-day\n"
