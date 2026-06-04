@@ -128,6 +128,15 @@ class Settings(BaseSettings):
         description="Hard cap on how many hourly rows the backfill will insert in one call.",
     )
 
+    # ── Prompt presentation ────────────────────────────────────────────────
+    PROMPT_RICH_HEADER: bool = Field(
+        True,
+        description=(
+            "Show year-progress + YTD category breakdown at the top of "
+            "every hourly prompt. Set false to revert to the lean header."
+        ),
+    )
+
     # ── Logging ────────────────────────────────────────────────────────────
     LOG_LEVEL: str = Field("INFO")
     LOG_JSON: bool = Field(

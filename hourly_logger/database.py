@@ -493,6 +493,32 @@ def queue_get_done_in_window(
         ).fetchall()
 
 
+def queue_category_hours_in_window(
+    start_utc: datetime, end_utc: datetime
+) -> dict[str, int]:
+    """Count ``done`` rows per category in ``[start_utc, end_utc]``.
+
+    One row = one hour, so the count *is* the hours. Used by the rich
+    hourly-prompt header (year-to-date breakdown) and any future
+    DB-side reporting that doesn't want to hit Google Sheets.
+
+    Rows with NULL category are bucketed under ``""`` so the caller
+    can decide how to surface them (typically merged into "Other" or
+    shown as a warning line).
+    """
+    with db_connect() as conn:
+        rows = conn.execute(
+            """SELECT COALESCE(category, '') AS cat, COUNT(*) AS n
+               FROM queue
+               WHERE status='done'
+                 AND scheduled_ts >= ?
+                 AND scheduled_ts <= ?
+               GROUP BY COALESCE(category, '')""",
+            (canonical_ts(start_utc), canonical_ts(end_utc)),
+        ).fetchall()
+    return {r["cat"]: int(r["n"]) for r in rows}
+
+
 def queue_get_all_scheduled_ts() -> set[str]:
     """Return the set of all scheduled_ts values in the queue (canonical
     UTC strings). Used by /repair to detect rows present in the Sheet but
