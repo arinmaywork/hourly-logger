@@ -80,15 +80,22 @@ def test_category_hours_respects_window_bounds(tmp_db_path: str) -> None:
 
 
 def test_bar_basic_proportions() -> None:
-    assert _bar(0, 10) == "░" * 10
-    assert _bar(10, 10) == "█" * 10
-    assert _bar(3, 10) == "███░░░░░░░"
+    # Default fill/empty switched to ▰/▱ for the aesthetic pass.
+    assert _bar(0, 10) == "▱" * 10
+    assert _bar(10, 10) == "▰" * 10
+    assert _bar(3, 10) == "▰▰▰▱▱▱▱▱▱▱"
 
 
 def test_bar_clamps_out_of_range() -> None:
     """Negative or oversize fill never produces a malformed bar."""
-    assert _bar(-1, 10) == "░" * 10
-    assert _bar(99, 10) == "█" * 10
+    assert _bar(-1, 10) == "▱" * 10
+    assert _bar(99, 10) == "▰" * 10
+
+
+def test_bar_accepts_custom_chars() -> None:
+    """Caller can override fill/empty (kept open for future themes
+    or for the year bar to diverge from the per-category bars)."""
+    assert _bar(2, 5, fill="█", empty="░") == "██░░░"
 
 
 # ── _build_year_header (integration) ───────────────────────────────────────
@@ -116,7 +123,7 @@ def test_header_contains_year_week_and_bar(
     assert "2026" in out
     assert "weeks left" in out
     # Year bar — solid + empty blocks in a fixed-width span.
-    assert "`" in out and "█" in out and "░" in out
+    assert "`" in out and "▰" in out and "▱" in out
 
 
 def test_header_shows_every_category_in_canonical_order(

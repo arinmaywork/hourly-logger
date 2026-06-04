@@ -66,30 +66,43 @@ DEFAULT_CATEGORY = "⚪️ Other"  # Bug #5 fallback for legacy NULL rows.
 # ── Year-progress rich header ──────────────────────────────────────────────
 
 
-def _bar(filled: int, width: int) -> str:
-    """Solid-block progress bar of fixed width."""
+def _bar(filled: int, width: int, fill: str = "▰", empty: str = "▱") -> str:
+    """Aesthetic parallelogram-block bar of fixed width.
+
+    Defaults to ▰/▱ (heavy parallelogram-style blocks) rather than
+    the original █/░ — friendlier letterform spacing on mobile and
+    a more designed look at small sizes.
+    """
     filled = max(0, min(width, filled))
-    return "█" * filled + "░" * (width - filled)
+    return fill * filled + empty * (width - filled)
 
 
 def _build_year_header(now_utc: datetime) -> str:
-    """Year-progress + YTD category breakdown shown above every hourly prompt.
+    """Minimal year-progress + YTD trend chart shown above every prompt.
 
-    Two stacked visualisations:
+    Layout (per the user's iterative feedback):
 
-    1. *Year bar* — ratio of elapsed days to total days in the year,
-       with a "N weeks left" count for the at-a-glance time-pressure
-       signal the user asked for.
-    2. *Category bars* — share of *elapsed* hours each category has
-       absorbed year-to-date, plus an explicit ``Unlogged`` row so the
-       gap between elapsed-and-logged is visible. Pulled from the DB
-       (not Sheets) so it's cheap to compute on every prompt and never
-       blocks on a Sheets quota hiccup.
+      🗓 2026 · 30 weeks left
+      ▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 42%
+      2,930h logged · 5,076h remaining
 
-    Layout is locked to a 10-char bar wrapped in backticks so the
-    columns line up on every Telegram client regardless of emoji
-    width — emoji widths vary, but the leading emoji + bar segment
-    is a self-contained monospace span.
+      🟢 ▰▰▱▱▱▱▱▱▱▱
+         680h
+      💎 ▰▱▱▱▱▱▱▱▱▱
+         450h
+      …
+
+    Each category renders as a 10-cell bar (share of *elapsed* hours,
+    not total) with the absolute hour count sitting on the line
+    directly below it — graphics first, raw number underneath. The
+    descriptive name is omitted; the emoji carries the identity.
+    Percentages are dropped for a calmer eyeline; the bar alone
+    communicates relative share. An explicit ⚫ Unlogged row
+    surfaces the gap between elapsed-and-logged so the user can see
+    backlog at a glance (suppressed when fully covered).
+
+    Data comes from SQLite (`queue_category_hours_in_window`) — one
+    GROUP BY, no Sheets quota cost, safe to run on every prompt.
     """
     from ..dates import log_day_bounds  # local — avoids handler-load cycle
 
@@ -120,26 +133,24 @@ def _build_year_header(now_utc: datetime) -> str:
 
     cat_bar_w = 10
     lines: list[str] = []
-    for cat in CATEGORY_ORDER:
-        h = by_cat.get(cat, 0)
-        share = h / hours_elapsed
+
+    def _row(emoji: str, hours: int) -> None:
+        share = hours / hours_elapsed
         bar = _bar(round(share * cat_bar_w), cat_bar_w)
-        # Leading emoji-only label: the user reads icons faster than
-        # repeated category names. Single-backtick monospace span
-        # keeps the bar column rigid; trailing stats stay proportional.
-        emoji = cat.split()[0]
-        lines.append(f"{emoji} `{bar}` {h:,}h · {share*100:4.1f}%")
+        lines.append(f"{emoji} `{bar}`")
+        lines.append(f"   {hours:,}h")
+
+    for cat in CATEGORY_ORDER:
+        _row(cat.split()[0], by_cat.get(cat, 0))
 
     unlogged = max(0, hours_elapsed - total_logged)
     if unlogged:
-        share = unlogged / hours_elapsed
-        bar = _bar(round(share * cat_bar_w), cat_bar_w)
-        lines.append(f"⚫ `{bar}` {unlogged:,}h · {share*100:4.1f}%")
+        _row("⚫", unlogged)
 
     return (
-        f"🗓 *{year}* — *{weeks_remaining}* weeks left\n"
-        f"`{year_bar}` {year_pct}%\n\n"
-        f"⏱ {total_logged:,}h logged · {hours_remaining:,}h remaining\n"
+        f"🗓 *{year}* · *{weeks_remaining}* weeks left\n"
+        f"`{year_bar}` {year_pct}%\n"
+        f"{total_logged:,}h logged · {hours_remaining:,}h remaining\n\n"
         + "\n".join(lines)
         + "\n\n"
     )
