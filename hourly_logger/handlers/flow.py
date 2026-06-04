@@ -137,8 +137,10 @@ def _build_year_header(now_utc: datetime) -> str:
     def _row(emoji: str, hours: int) -> None:
         share = hours / hours_elapsed
         bar = _bar(round(share * cat_bar_w), cat_bar_w)
-        lines.append(f"{emoji} `{bar}`")
-        lines.append(f"   {hours:,}h")
+        # Bar + hours + percentage on a single line — graphics first,
+        # numeric pair on the right, single mid-dot separator keeps
+        # the eye moving without visual clutter.
+        lines.append(f"{emoji} `{bar}`  {hours:,}h · {share*100:4.1f}%")
 
     for cat in CATEGORY_ORDER:
         _row(cat.split()[0], by_cat.get(cat, 0))

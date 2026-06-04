@@ -206,7 +206,7 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if current:
                 until = now_local
             periods.append((first.strftime("%b %Y"), first, until, current))
-        title = f"📈 *Monthly Trend — {year_arg}*"
+        title = f"📈 *Monthly · {year_arg}*"
     else:  # weekly
         if len(args) > 1:
             try:
@@ -238,7 +238,7 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             periods.append((label, since, until, current))
             mon += dt.timedelta(days=7)
 
-        title = f"📈 *Weekly Trend — {datetime(ref_year, ref_month, 1).strftime('%B %Y')}*"
+        title = f"📈 *Weekly · {datetime(ref_year, ref_month, 1).strftime('%B %Y')}*"
 
     if not periods:
         await update.message.reply_text("No periods to show.")
@@ -263,24 +263,56 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 uncat += 1
         return counts, uncat
 
-    lines = [title, ""]
+    # Pre-pass: gather totals per period so we can normalise the
+    # bar widths against the busiest period (peak = full bar).
+    rendered: list[tuple[str, bool, dict[str, int], int, int]] = []
     any_uncat = False
     for label, since, until, is_current in periods:
         counts, uncat = count_period(since, until)
         total = sum(counts.values()) + uncat
         if total == 0:
             continue
-        marker = "✦" if is_current else " "
-        cat_parts = " ".join(f"{cat_icon[c]}{counts.get(c, 0)}" for c in CATEGORY_ORDER)
         if uncat:
-            cat_parts += f" ⚠️{uncat}"
             any_uncat = True
-        lines.append(f"`{marker}{label:<14}` {cat_parts}  *{total}h*")
+        rendered.append((label, is_current, counts, uncat, total))
 
-    lines += [
-        "",
-        "_" + " · ".join(f"{cat_icon[c]} {c.split()[-1]}" for c in CATEGORY_ORDER) + "_",
-    ]
+    if not rendered:
+        await update.message.reply_text(
+            f"{title}\n\n_No entries in any period._", parse_mode="Markdown"
+        )
+        return
+
+    peak = max(t for *_, t in rendered)
+    bar_w = 10
+
+    def _bar(filled: int) -> str:
+        filled = max(0, min(bar_w, filled))
+        return "▰" * filled + "▱" * (bar_w - filled)
+
+    # Label-width pad so the bar column is rigid across rows even
+    # when month abbreviations differ in width on mobile fonts.
+    label_w = max(len(lbl) for lbl, *_ in rendered)
+
+    lines = [title, ""]
+    for label, is_current, counts, uncat, total in rendered:
+        marker = "✦" if is_current else " "
+        bar = _bar(round(total / peak * bar_w))
+        lines.append(f"`{marker}{label:<{label_w}}` `{bar}`  *{total}h*")
+        # Compact category breakdown sits indented just below the
+        # bar — graphics on top, hour-per-category on the next line,
+        # matching the prompt header's "bars first, numbers second"
+        # rhythm. Zero-count categories are omitted to keep the row
+        # uncluttered.
+        cat_bits = [
+            f"{cat_icon[c]}{counts.get(c, 0)}"
+            for c in CATEGORY_ORDER if counts.get(c, 0) > 0
+        ]
+        if uncat:
+            cat_bits.append(f"⚠️{uncat}")
+        if cat_bits:
+            lines.append("    " + "  ".join(cat_bits))
+
     if any_uncat:
+        lines.append("")
         lines.append("_⚠️ = uncategorised rows in the Sheet — try /fixcats_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
