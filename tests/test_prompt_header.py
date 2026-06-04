@@ -122,8 +122,10 @@ def test_header_contains_year_week_and_bar(
 def test_header_shows_every_category_in_canonical_order(
     tmp_db_path: str, header_env: None
 ) -> None:
-    """All 5 categories appear, in the same order the keyboard uses
-    (CATEGORY_ORDER), so the eye-to-keyboard mapping stays stable."""
+    """All 5 category emoji-rows appear, in the same order the
+    keyboard uses (CATEGORY_ORDER), so the eye-to-keyboard mapping
+    stays stable. Each row is identified by its leading-emoji + bar
+    pattern, since the descriptive name was dropped on purpose."""
     db_init()
     now = datetime(2026, 6, 3, 14, 0, tzinfo=timezone.utc)
     fake = {
@@ -139,11 +141,13 @@ def test_header_shows_every_category_in_canonical_order(
     ):
         out = _build_year_header(now)
 
-    creative = out.find("🟢 Creative")
-    health = out.find("💎 Health")
-    prof = out.find("🔘 Professional")
-    social = out.find("🟡 Social")
-    other = out.find("⚪️ Other")
+    # Each per-category row starts with the emoji followed by a
+    # backtick-wrapped bar — unique enough that .find() pins the row.
+    creative = out.find("🟢 `")
+    health = out.find("💎 `")
+    prof = out.find("🔘 `")
+    social = out.find("🟡 `")
+    other = out.find("⚪️ `")
     assert -1 < creative < health < prof < social < other
 
 
@@ -160,7 +164,10 @@ def test_header_surfaces_unlogged_gap(
         return_value={"🟢 Creative": 10},
     ):
         out = _build_year_header(now)
-    assert "Unlogged" in out
+    # The unlogged row is identified by its ⚫ emoji + backtick-bar
+    # prefix — the descriptive "Unlogged" label was dropped along
+    # with the other category names.
+    assert "⚫ `" in out
 
 
 def test_header_omits_unlogged_when_fully_covered(
@@ -178,7 +185,7 @@ def test_header_omits_unlogged_when_fully_covered(
         return_value={"🟢 Creative": 999},
     ):
         out = _build_year_header(now_utc)
-    assert "Unlogged" not in out
+    assert "⚫" not in out  # the unlogged-gap row is suppressed
 
 
 def test_header_handles_first_hour_of_year_no_zero_division(
@@ -197,7 +204,9 @@ def test_header_handles_first_hour_of_year_no_zero_division(
         return_value={},
     ):
         out = _build_year_header(now)
-    assert "Year so far" in out
+    # Surviving anchor text after the wording trim — "h logged · "
+    # is unique to the second line of the header.
+    assert "h logged ·" in out
 
 
 def test_header_weeks_remaining_decreases_through_year(

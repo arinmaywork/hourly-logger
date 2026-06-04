@@ -124,21 +124,22 @@ def _build_year_header(now_utc: datetime) -> str:
         h = by_cat.get(cat, 0)
         share = h / hours_elapsed
         bar = _bar(round(share * cat_bar_w), cat_bar_w)
-        # Single-backtick monospace span keeps the bar column rigid
-        # while letting the trailing label flow.
-        lines.append(f"`{bar}` {cat}  {h:,}h · {share*100:4.1f}%")
+        # Leading emoji-only label: the user reads icons faster than
+        # repeated category names. Single-backtick monospace span
+        # keeps the bar column rigid; trailing stats stay proportional.
+        emoji = cat.split()[0]
+        lines.append(f"{emoji} `{bar}` {h:,}h · {share*100:4.1f}%")
 
     unlogged = max(0, hours_elapsed - total_logged)
     if unlogged:
         share = unlogged / hours_elapsed
         bar = _bar(round(share * cat_bar_w), cat_bar_w)
-        lines.append(f"`{bar}` ⚫ Unlogged  {unlogged:,}h · {share*100:4.1f}%")
+        lines.append(f"⚫ `{bar}` {unlogged:,}h · {share*100:4.1f}%")
 
     return (
         f"🗓 *{year}* — *{weeks_remaining}* weeks left\n"
         f"`{year_bar}` {year_pct}%\n\n"
-        f"⏱ *Year so far* — {total_logged:,}h logged · "
-        f"{hours_remaining:,}h remaining in {year}\n"
+        f"⏱ {total_logged:,}h logged · {hours_remaining:,}h remaining\n"
         + "\n".join(lines)
         + "\n\n"
     )
@@ -184,9 +185,7 @@ async def send_prompt(bot, queue_row, *, is_edit: bool = False) -> bool:
         f"{year_header}"
         f"{header}"
         f"📝 *Hourly Log* — `{scheduled.strftime('%a %b %d, %H:%M')}`\n\n"
-        f"*Step 1/2:* Select a category:\n"
-        f"_or skip the keyboard:_ `/log c Deep Work,, note`\n"
-        f"`c` Creative · `h` Health · `p` Professional · `s` Social · `o` Other\n\n"
+        f"*Step 1/2:* Select a category:\n\n"
         f"/skip · /cancel · /status · /edit · /sync"
     )
     keyboard = [[cat] for cat in CATEGORIES.keys()]
