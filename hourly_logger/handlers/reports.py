@@ -263,8 +263,7 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 uncat += 1
         return counts, uncat
 
-    # Pre-pass: gather totals per period so we can normalise the
-    # bar widths against the busiest period (peak = full bar).
+    # Pre-pass: gather totals per period.
     rendered: list[tuple[str, bool, dict[str, int], int, int]] = []
     any_uncat = False
     for label, since, until, is_current in periods:
@@ -282,27 +281,71 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    peak = max(t for *_, t in rendered)
+    grand_total = sum(t for *_, t in rendered)
+    label_w = max(len(lbl) for lbl, *_ in rendered)
+
+    # Category → colored-square emoji. Picked to echo the prompt
+    # header's category emojis: 🟢→🟩, 💎→🟦 (cyan→blue is the
+    # closest square), 🔘→🟫 (no gray square exists; brown reads as
+    # the heaviest neutral), 🟡→🟨, ⚪️→⬜. Uncategorised rows ride
+    # 🟥 so they're impossible to miss in the bar.
+    CAT_BLOCK: dict[str, str] = {
+        "🟢 Creative":     "🟩",
+        "💎 Health":       "🟦",
+        "🔘 Professional": "🟫",
+        "🟡 Social":       "🟨",
+        "⚪️ Other":        "⬜",
+    }
+    UNCAT_BLOCK = "🟥"
+
     bar_w = 10
 
-    def _bar(filled: int) -> str:
-        filled = max(0, min(bar_w, filled))
-        return "▰" * filled + "▱" * (bar_w - filled)
+    def _stacked(counts: dict[str, int], uncat: int, total: int) -> str:
+        """Render a fixed-width stacked colored bar showing each
+        category's share of ``total``. Largest-remainder allocation,
+        then a steal-from-biggest pass guarantees every non-zero
+        category gets at least one cell — so a tiny 4% slice still
+        shows up as a visible square instead of being rounded away."""
+        items: list[tuple[str, int]] = [
+            (CAT_BLOCK[c], counts.get(c, 0)) for c in CATEGORY_ORDER
+        ]
+        if uncat:
+            items.append((UNCAT_BLOCK, uncat))
+        items = [(b, n) for b, n in items if n > 0]
+        if not items:
+            return "▱" * bar_w
 
-    # Label-width pad so the bar column is rigid across rows even
-    # when month abbreviations differ in width on mobile fonts.
-    label_w = max(len(lbl) for lbl, *_ in rendered)
+        exact = [n / total * bar_w for _, n in items]
+        cells = [int(e) for e in exact]
+        deficit = bar_w - sum(cells)
+        # Hand the unallocated cells to whichever categories had the
+        # largest fractional remainder — standard apportionment.
+        order = sorted(range(len(items)), key=lambda i: -(exact[i] - cells[i]))
+        for i in order[:deficit]:
+            cells[i] += 1
+
+        # Ensure no visible category vanishes: any 0-cell entry with
+        # a non-zero count steals one cell from the current biggest.
+        zeros = [i for i, c in enumerate(cells) if c == 0]
+        for i in zeros:
+            j = max(range(len(cells)), key=lambda k: cells[k])
+            if cells[j] > 1:
+                cells[j] -= 1
+                cells[i] = 1
+
+        return "".join(b * n for (b, _), n in zip(items, cells))
 
     lines = [title, ""]
     for label, is_current, counts, uncat, total in rendered:
         marker = "✦" if is_current else " "
-        bar = _bar(round(total / peak * bar_w))
-        lines.append(f"`{marker}{label:<{label_w}}` `{bar}`  *{total}h*")
-        # Compact category breakdown sits indented just below the
-        # bar — graphics on top, hour-per-category on the next line,
-        # matching the prompt header's "bars first, numbers second"
-        # rhythm. Zero-count categories are omitted to keep the row
-        # uncluttered.
+        bar = _stacked(counts, uncat, total)
+        pct = total / grand_total * 100 if grand_total else 0
+        lines.append(
+            f"`{marker}{label:<{label_w}}` {bar}  *{total}h* · {pct:.1f}%"
+        )
+        # Compact per-category breakdown on the next line — counts
+        # carry the precision the 10-cell stacked bar can't, and
+        # zero-count categories are omitted to keep the row clean.
         cat_bits = [
             f"{cat_icon[c]}{counts.get(c, 0)}"
             for c in CATEGORY_ORDER if counts.get(c, 0) > 0
@@ -314,5 +357,5 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if any_uncat:
         lines.append("")
-        lines.append("_⚠️ = uncategorised rows in the Sheet — try /fixcats_")
+        lines.append("_🟥 = uncategorised rows in the Sheet — try /fixcats_")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
