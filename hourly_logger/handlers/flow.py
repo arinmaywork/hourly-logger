@@ -77,19 +77,6 @@ def _bar(filled: int, width: int, fill: str = "▰", empty: str = "▱") -> str:
     return fill * filled + empty * (width - filled)
 
 
-# Telegram can't colour text/code spans, so the bar itself stays
-# in monochrome ▰/▱ (the text aesthetic the user liked). Each row
-# leads with a colour-square swatch that matches the /trend palette
-# — 🟢→🟩, 💎→🟦, 🔘→🟫 (no gray square exists), 🟡→🟨, ⚪→⬜,
-# ⚫→⬛. The swatch is the "colour", the bar is the magnitude.
-CAT_FILL: dict[str, str] = {
-    "🟢 Creative":     "🟩",
-    "💎 Health":       "🟦",
-    "🔘 Professional": "🟫",
-    "🟡 Social":       "🟨",
-    "⚪️ Other":        "⬜",
-}
-UNLOGGED_FILL = "⬛"
 
 
 def _build_year_header(now_utc: datetime) -> str:
@@ -149,21 +136,20 @@ def _build_year_header(now_utc: datetime) -> str:
     cat_bar_w = 10
     lines: list[str] = []
 
-    def _row(emoji: str, swatch: str, hours: int) -> None:
+    def _row(emoji: str, hours: int) -> None:
         share = hours / hours_elapsed
         bar = _bar(round(share * cat_bar_w), cat_bar_w)
-        # Colour swatch on the far left (matches /trend palette),
-        # then the category emoji as the row identifier, then the
-        # text-aesthetic ▰/▱ bar wrapped in monospace so its width
-        # stays rigid across rows. Hours + percentage flush right.
-        lines.append(f"{swatch} {emoji} `{bar}`  {hours:,}h · {share*100:4.1f}%")
+        # Category emoji on the left, monospace ▰/▱ bar wrapped in
+        # backticks so its width stays rigid, hours + percentage
+        # flush right.
+        lines.append(f"{emoji} `{bar}`  {hours:,}h · {share*100:4.1f}%")
 
     for cat in CATEGORY_ORDER:
-        _row(cat.split()[0], CAT_FILL[cat], by_cat.get(cat, 0))
+        _row(cat.split()[0], by_cat.get(cat, 0))
 
     unlogged = max(0, hours_elapsed - total_logged)
     if unlogged:
-        _row("⚫", UNLOGGED_FILL, unlogged)
+        _row("⚫", unlogged)
 
     return (
         f"🗓 *{year}* · *{weeks_remaining}* weeks left\n"
