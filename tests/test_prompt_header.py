@@ -153,14 +153,14 @@ def test_header_shows_every_category_in_canonical_order(
     ):
         out = _build_year_header(now)
 
-    # Each per-category row starts with the emoji followed by the
-    # category's colour-square fill — unique enough that .find() pins
-    # the row regardless of bar width or share.
-    creative = out.find("🟢 🟩")
-    health = out.find("💎 🟦")
-    prof = out.find("🔘 🟫")
-    social = out.find("🟡 🟨")
-    other = out.find("⚪️ ⬜")
+    # Each per-category row starts with the category colour swatch
+    # followed by the category emoji — unique enough that .find()
+    # pins the row regardless of bar width or share.
+    creative = out.find("🟩 🟢")
+    health = out.find("🟦 💎")
+    prof = out.find("🟫 🔘")
+    social = out.find("🟨 🟡")
+    other = out.find("⬜ ⚪️")
     assert -1 < creative < health < prof < social < other
 
 
@@ -177,9 +177,9 @@ def test_header_surfaces_unlogged_gap(
         return_value={"🟢 Creative": 10},
     ):
         out = _build_year_header(now)
-    # The unlogged row is identified by its ⚫ emoji followed by the
-    # black-square fill (no descriptive "Unlogged" label).
-    assert "⚫ ⬛" in out
+    # The unlogged row leads with the black swatch + ⚫ emoji
+    # (no descriptive "Unlogged" label).
+    assert "⬛ ⚫" in out
 
 
 def test_header_omits_unlogged_when_fully_covered(
@@ -197,7 +197,7 @@ def test_header_omits_unlogged_when_fully_covered(
         return_value={"🟢 Creative": 999},
     ):
         out = _build_year_header(now_utc)
-    assert "⚫" not in out  # the unlogged-gap row is suppressed
+    assert "⬛ ⚫" not in out  # the unlogged-gap row is suppressed
 
 
 def test_header_handles_first_hour_of_year_no_zero_division(

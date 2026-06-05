@@ -77,13 +77,11 @@ def _bar(filled: int, width: int, fill: str = "▰", empty: str = "▱") -> str:
     return fill * filled + empty * (width - filled)
 
 
-# Telegram can't colour text/code spans, so true coloured ▰ isn't
-# achievable — the closest "similar but coloured" rendering is a
-# bar of colour-square emoji. Each category gets its own fill that
-# mirrors its primary emoji (🟢→🟩, 💎→🟦, 🔘→🟫 (no gray square
-# exists), 🟡→🟨, ⚪→⬜, ⚫→⬛). Empty cells use 🔳 — a
-# white-bordered square — so the ⚪ Other row stays visible against
-# its ⬜ fill instead of disappearing into all-white.
+# Telegram can't colour text/code spans, so the bar itself stays
+# in monochrome ▰/▱ (the text aesthetic the user liked). Each row
+# leads with a colour-square swatch that matches the /trend palette
+# — 🟢→🟩, 💎→🟦, 🔘→🟫 (no gray square exists), 🟡→🟨, ⚪→⬜,
+# ⚫→⬛. The swatch is the "colour", the bar is the magnitude.
 CAT_FILL: dict[str, str] = {
     "🟢 Creative":     "🟩",
     "💎 Health":       "🟦",
@@ -92,7 +90,6 @@ CAT_FILL: dict[str, str] = {
     "⚪️ Other":        "⬜",
 }
 UNLOGGED_FILL = "⬛"
-BAR_EMPTY = "🔳"
 
 
 def _build_year_header(now_utc: datetime) -> str:
@@ -152,14 +149,14 @@ def _build_year_header(now_utc: datetime) -> str:
     cat_bar_w = 10
     lines: list[str] = []
 
-    def _row(emoji: str, fill: str, hours: int) -> None:
+    def _row(emoji: str, swatch: str, hours: int) -> None:
         share = hours / hours_elapsed
-        n = max(0, min(cat_bar_w, round(share * cat_bar_w)))
-        bar = fill * n + BAR_EMPTY * (cat_bar_w - n)
-        # Category emoji on the left identifies the row; the bar
-        # itself carries the category colour via the fill emoji.
-        # Hours + percentage flush right.
-        lines.append(f"{emoji} {bar}  {hours:,}h · {share*100:4.1f}%")
+        bar = _bar(round(share * cat_bar_w), cat_bar_w)
+        # Colour swatch on the far left (matches /trend palette),
+        # then the category emoji as the row identifier, then the
+        # text-aesthetic ▰/▱ bar wrapped in monospace so its width
+        # stays rigid across rows. Hours + percentage flush right.
+        lines.append(f"{swatch} {emoji} `{bar}`  {hours:,}h · {share*100:4.1f}%")
 
     for cat in CATEGORY_ORDER:
         _row(cat.split()[0], CAT_FILL[cat], by_cat.get(cat, 0))
