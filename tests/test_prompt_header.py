@@ -132,15 +132,20 @@ def test_header_shows_every_category_in_canonical_order(
     """All 5 category emoji-rows appear, in the same order the
     keyboard uses (CATEGORY_ORDER), so the eye-to-keyboard mapping
     stays stable. Each row is identified by its leading-emoji + bar
-    pattern, since the descriptive name was dropped on purpose."""
+    pattern, since the descriptive name was dropped on purpose.
+
+    Numbers chosen so every category clears the ≥5% threshold needed
+    for a 10-cell bar to allocate a visible square — without that
+    we'd be testing rounding behaviour, not row order.
+    """
     db_init()
     now = datetime(2026, 6, 3, 14, 0, tzinfo=timezone.utc)
     fake = {
-        "🟢 Creative": 100,
-        "💎 Health": 50,
-        "🔘 Professional": 200,
-        "🟡 Social": 30,
-        "⚪️ Other": 20,
+        "🟢 Creative": 800,
+        "💎 Health": 400,
+        "🔘 Professional": 700,
+        "🟡 Social": 300,
+        "⚪️ Other": 250,
     }
     with patch(
         "hourly_logger.handlers.flow.queue_category_hours_in_window",
@@ -148,13 +153,14 @@ def test_header_shows_every_category_in_canonical_order(
     ):
         out = _build_year_header(now)
 
-    # Each per-category row starts with the emoji followed by a
-    # backtick-wrapped bar — unique enough that .find() pins the row.
-    creative = out.find("🟢 `")
-    health = out.find("💎 `")
-    prof = out.find("🔘 `")
-    social = out.find("🟡 `")
-    other = out.find("⚪️ `")
+    # Each per-category row starts with the emoji followed by the
+    # category's colour-square fill — unique enough that .find() pins
+    # the row regardless of bar width or share.
+    creative = out.find("🟢 🟩")
+    health = out.find("💎 🟦")
+    prof = out.find("🔘 🟫")
+    social = out.find("🟡 🟨")
+    other = out.find("⚪️ ⬜")
     assert -1 < creative < health < prof < social < other
 
 
@@ -171,10 +177,9 @@ def test_header_surfaces_unlogged_gap(
         return_value={"🟢 Creative": 10},
     ):
         out = _build_year_header(now)
-    # The unlogged row is identified by its ⚫ emoji + backtick-bar
-    # prefix — the descriptive "Unlogged" label was dropped along
-    # with the other category names.
-    assert "⚫ `" in out
+    # The unlogged row is identified by its ⚫ emoji followed by the
+    # black-square fill (no descriptive "Unlogged" label).
+    assert "⚫ ⬛" in out
 
 
 def test_header_omits_unlogged_when_fully_covered(

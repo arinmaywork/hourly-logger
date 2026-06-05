@@ -77,6 +77,24 @@ def _bar(filled: int, width: int, fill: str = "▰", empty: str = "▱") -> str:
     return fill * filled + empty * (width - filled)
 
 
+# Telegram can't colour text/code spans, so true coloured ▰ isn't
+# achievable — the closest "similar but coloured" rendering is a
+# bar of colour-square emoji. Each category gets its own fill that
+# mirrors its primary emoji (🟢→🟩, 💎→🟦, 🔘→🟫 (no gray square
+# exists), 🟡→🟨, ⚪→⬜, ⚫→⬛). Empty cells use 🔳 — a
+# white-bordered square — so the ⚪ Other row stays visible against
+# its ⬜ fill instead of disappearing into all-white.
+CAT_FILL: dict[str, str] = {
+    "🟢 Creative":     "🟩",
+    "💎 Health":       "🟦",
+    "🔘 Professional": "🟫",
+    "🟡 Social":       "🟨",
+    "⚪️ Other":        "⬜",
+}
+UNLOGGED_FILL = "⬛"
+BAR_EMPTY = "🔳"
+
+
 def _build_year_header(now_utc: datetime) -> str:
     """Minimal year-progress + YTD trend chart shown above every prompt.
 
@@ -134,20 +152,21 @@ def _build_year_header(now_utc: datetime) -> str:
     cat_bar_w = 10
     lines: list[str] = []
 
-    def _row(emoji: str, hours: int) -> None:
+    def _row(emoji: str, fill: str, hours: int) -> None:
         share = hours / hours_elapsed
-        bar = _bar(round(share * cat_bar_w), cat_bar_w)
-        # Bar + hours + percentage on a single line — graphics first,
-        # numeric pair on the right, single mid-dot separator keeps
-        # the eye moving without visual clutter.
-        lines.append(f"{emoji} `{bar}`  {hours:,}h · {share*100:4.1f}%")
+        n = max(0, min(cat_bar_w, round(share * cat_bar_w)))
+        bar = fill * n + BAR_EMPTY * (cat_bar_w - n)
+        # Category emoji on the left identifies the row; the bar
+        # itself carries the category colour via the fill emoji.
+        # Hours + percentage flush right.
+        lines.append(f"{emoji} {bar}  {hours:,}h · {share*100:4.1f}%")
 
     for cat in CATEGORY_ORDER:
-        _row(cat.split()[0], by_cat.get(cat, 0))
+        _row(cat.split()[0], CAT_FILL[cat], by_cat.get(cat, 0))
 
     unlogged = max(0, hours_elapsed - total_logged)
     if unlogged:
-        _row("⚫", unlogged)
+        _row("⚫", UNLOGGED_FILL, unlogged)
 
     return (
         f"🗓 *{year}* · *{weeks_remaining}* weeks left\n"
