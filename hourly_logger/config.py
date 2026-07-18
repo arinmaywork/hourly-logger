@@ -137,6 +137,23 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Journal ingest (Obsidian daily notes) ──────────────────────────────
+    VAULT_DIR: Optional[str] = Field(
+        None, description="Path to the local clone of the Obsidian vault git repo"
+    )
+    JOURNAL_SUBDIR: str = Field(
+        "", description="Optional subfolder inside the vault containing daily notes"
+    )
+    JOURNAL_INGEST_DAYS: int = Field(
+        7, ge=1, le=3650, description="Look-back window (days) per ingest run"
+    )
+    GEMINI_API_KEY: Optional[str] = Field(
+        None, description="Google AI Studio key (free tier). Unset = rules parser only."
+    )
+    GEMINI_MODEL: str = Field("gemini-2.5-flash")
+    GEMINI_TIMEOUT_S: int = Field(60, ge=5, le=300)
+    GEMINI_MAX_RETRIES: int = Field(3, ge=1, le=6)
+
     # ── Logging ────────────────────────────────────────────────────────────
     LOG_LEVEL: str = Field("INFO")
     LOG_JSON: bool = Field(

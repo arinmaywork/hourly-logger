@@ -281,12 +281,48 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_v6(conn: sqlite3.Connection) -> None:
+    """Journal ingest tables (Obsidian daily notes).
+
+    ``raw_md`` is always stored so history can be re-extracted whenever the
+    canonical schema evolves. ``note_hash`` (sha256 of raw_md) makes re-runs
+    over unchanged notes free. ``parsed_json`` holds the full DayRecord;
+    mood/energy are denormalised for cheap SQL trend queries, and
+    ``journal_activities`` denormalises planned-vs-completed the same way.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS journal_days (
+               date        TEXT PRIMARY KEY,
+               raw_md      TEXT NOT NULL,
+               note_hash   TEXT NOT NULL,
+               mood        INTEGER,
+               energy      INTEGER,
+               parsed_json TEXT NOT NULL,
+               extractor   TEXT NOT NULL CHECK(extractor IN ('rules','gemini')),
+               thin        INTEGER NOT NULL DEFAULT 0,
+               ingested_ts TEXT NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS journal_activities (
+               date      TEXT NOT NULL REFERENCES journal_days(date) ON DELETE CASCADE,
+               name      TEXT NOT NULL,
+               completed INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (date, name)
+           )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_journal_act_date ON journal_activities(date)"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_v1),
     (2, _migration_v2),
     (3, _migration_v3),
     (4, _migration_v4),
     (5, _migration_v5),
+    (6, _migration_v6),
 ]
 
 

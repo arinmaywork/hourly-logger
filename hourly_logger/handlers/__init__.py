@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import commands, edit, flow, log, maintenance, reports
+from . import ask, commands, edit, flow, log, maintenance, reports
 
 
 def register_handlers(app: Application) -> None:
@@ -25,6 +25,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("skip",     commands.cmd_skip))
     app.add_handler(CommandHandler("skipall",  commands.cmd_skipall))
     app.add_handler(CommandHandler("cancel",   commands.cmd_cancel))
+    app.add_handler(CommandHandler("ask",      ask.cmd_ask))
     app.add_handler(CommandHandler("status",   reports.cmd_status))
     app.add_handler(CommandHandler("monthly",  reports.cmd_monthly))
     app.add_handler(CommandHandler("weekly",   reports.cmd_weekly))
