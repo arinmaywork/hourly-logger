@@ -108,7 +108,13 @@ class TestAsk:
         monkeypatch.setattr(ask, "generate", fake_generate)
         assert ask.answer("how are my weeks?") == "grounded answer"
         assert "=== QUESTION ===" in seen["prompt"]
-        assert seen["kw"]["max_output_tokens"] == 800
+        assert seen["kw"]["max_output_tokens"] == 1024
+
+    def test_answer_strips_markdown(self, seeded_db, monkeypatch: pytest.MonkeyPatch):
+        from hourly_logger.ai import ask
+
+        monkeypatch.setattr(ask, "generate", lambda p, **kw: "**Home Cooking**: skipped 4/9")
+        assert ask.answer("q") == "Home Cooking: skipped 4/9"
 
 
 class TestLlmClient:

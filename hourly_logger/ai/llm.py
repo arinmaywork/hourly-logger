@@ -33,15 +33,22 @@ def generate(
     response_schema: Optional[dict[str, Any]] = None,
     temperature: float = 0.4,
     max_output_tokens: int = 1024,
+    thinking_budget: int = 0,
 ) -> str:
     """One prompt in, text out. ``response_schema`` switches on structured
-    JSON output (the returned string is then guaranteed-parseable JSON)."""
+    JSON output (the returned string is then guaranteed-parseable JSON).
+
+    ``thinking_budget=0`` disables Gemini 2.5's hidden reasoning tokens,
+    which otherwise count against ``maxOutputTokens`` and can silently
+    truncate the visible answer mid-sentence.
+    """
     if not settings.GEMINI_API_KEY:
         raise LlmError("GEMINI_API_KEY is not configured")
 
     gen_config: dict[str, Any] = {
         "temperature": temperature,
         "maxOutputTokens": max_output_tokens,
+        "thinkingConfig": {"thinkingBudget": thinking_budget},
     }
     if response_schema is not None:
         gen_config["responseMimeType"] = "application/json"

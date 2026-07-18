@@ -26,7 +26,8 @@ _INSTRUCTION = (
     "question, say exactly what is missing.\n"
     "- Be direct and specific; no flattery, no generic self-help filler.\n"
     "- At most one concrete, data-backed suggestion when relevant.\n"
-    "- Plain text only (Telegram), under 180 words."
+    "- Plain text only (Telegram): no markdown, no ** or # or bullets-with-*, "
+    "use simple dashes and numbers. Under 180 words."
 )
 
 
@@ -48,4 +49,7 @@ def build_prompt(question: str) -> str:
 
 def answer(question: str) -> str:
     """Blocking. Handlers call this via ``asyncio.to_thread``."""
-    return generate(build_prompt(question), temperature=0.4, max_output_tokens=800)
+    text = generate(build_prompt(question), temperature=0.4, max_output_tokens=1024)
+    # Belt-and-braces: the model occasionally ignores the no-markdown rule,
+    # and Telegram would show the asterisks/headers literally.
+    return text.replace("**", "").replace("__", "").lstrip("#").strip()
