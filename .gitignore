@@ -1,5 +1,6 @@
 credentials.json
 .env
+PROJECT_REFERENCE.md
 *.db
 venv/
 __pycache__/

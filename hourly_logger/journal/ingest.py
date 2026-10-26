@@ -76,16 +76,24 @@ def vault_dir() -> Path:
 
 
 def git_pull() -> tuple[bool, str]:
-    """``git pull --ff-only`` in the vault clone. Never raises."""
+    """Sync the read-only vault clone to origin/main. Never raises.
+
+    Uses ``fetch`` + ``reset --hard`` instead of ``pull --ff-only`` so a
+    force-pushed / history-rewritten remote can't wedge the job. Safe because
+    this clone is never edited locally.
+    """
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(vault_dir()), "pull", "--ff-only"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        msg = (proc.stdout + proc.stderr).strip()[-300:]
-        return proc.returncode == 0, msg
+        repo = str(vault_dir())
+        for args in (["fetch", "origin"], ["reset", "--hard", "origin/main"]):
+            proc = subprocess.run(
+                ["git", "-C", repo, *args],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if proc.returncode != 0:
+                return False, (proc.stdout + proc.stderr).strip()[-300:]
+        return True, (proc.stdout + proc.stderr).strip()[-300:]
     except Exception as e:  # noqa: BLE001 — cron must degrade, not crash
         return False, str(e)
 
